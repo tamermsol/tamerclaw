@@ -64,17 +64,80 @@ check_prereqs() {
   info "Prerequisites OK (Node.js $(node -v), Claude CLI found)"
 }
 
+# ── Claude Code Auth Check ────────────────────────────────────────────────────
+check_claude_auth() {
+  echo ""
+  info "Checking Claude Code authentication..."
+
+  # Test if claude is authenticated by running a simple command
+  local auth_test
+  auth_test=$(echo "respond with just OK" | claude -p --output-format text 2>&1) || true
+
+  if echo "$auth_test" | grep -qi "OK"; then
+    info "Claude Code is authenticated and working"
+    return 0
+  fi
+
+  # Not authenticated — guide the user
+  warn "Claude Code is not authenticated yet."
+  echo ""
+  echo -e "  ${BOLD}You need to log in to Claude Code first.${NC}"
+  echo ""
+  echo "  Run this command in a separate terminal:"
+  echo ""
+  echo -e "    ${CYAN}claude${NC}"
+  echo ""
+  echo "  This will open a browser for authentication."
+  echo "  Once logged in, come back here and continue."
+  echo ""
+  ask "Press Enter when you've logged in to Claude Code (or 'skip' to continue without):"
+  read -r auth_response
+
+  if [ "$auth_response" = "skip" ]; then
+    warn "Skipping auth check. Agents won't work until Claude Code is authenticated."
+    return 0
+  fi
+
+  # Re-test
+  auth_test=$(echo "respond with just OK" | claude -p --output-format text 2>&1) || true
+  if echo "$auth_test" | grep -qi "OK"; then
+    info "Claude Code is authenticated and working"
+  else
+    warn "Claude Code still not responding. Check authentication and try again."
+    warn "Continuing setup — you can fix auth later."
+  fi
+}
+
+# ── Detect claude binary path for systemd ─────────────────────────────────────
+get_claude_path() {
+  local claude_bin
+  claude_bin=$(which claude 2>/dev/null || echo "")
+  if [ -z "$claude_bin" ]; then
+    # Common locations
+    for p in "$HOME/.local/bin/claude" "/usr/local/bin/claude" "/usr/bin/claude"; do
+      if [ -x "$p" ]; then
+        claude_bin="$p"
+        break
+      fi
+    done
+  fi
+  echo "$claude_bin"
+}
+
 # ── Agent Scanner ─────────────────────────────────────────────────────────────
 # Scans the user's system for existing Claude Code agent directories.
 # Looks for: CLAUDE.md, IDENTITY.md, .claude/ dirs in common locations.
 scan_agents() {
   local found=()
-  local search_dirs=("$HOME" "/root")
+  local search_dirs=("$HOME")
 
-  # Also check if there's an existing claude-agents setup
-  if [ -d "/root/claude-agents/agents" ]; then
-    search_dirs+=("/root/claude-agents/agents")
-  fi
+  # Add /root if not already HOME
+  [ "$HOME" != "/root" ] && [ -d "/root" ] && search_dirs+=("/root")
+
+  # Check for existing claude-agents setups
+  for base in "$HOME" "/root"; do
+    [ -d "$base/claude-agents/agents" ] && search_dirs+=("$base/claude-agents/agents")
+  done
 
   echo ""
   info "Scanning for existing Claude Code agents..."
@@ -163,6 +226,7 @@ cmd_init() {
   fi
 
   check_prereqs
+  check_claude_auth
 
   echo ""
   echo -e "${BOLD}Let's set up your TamerClaw system.${NC}"
@@ -180,10 +244,33 @@ cmd_init() {
     telegram_id=""
   fi
 
-  # ── Step 2: Scan for agents ──
+  # ── Step 2: Supreme Agent (FIRST — it makes everything else simpler) ──
+  echo ""
+  echo -e "${BOLD}═══ Supreme Agent Setup ═══${NC}"
+  echo ""
+  echo "The Supreme Agent is your master controller. It manages all other agents,"
+  echo "fixes bugs, creates new agents, and coordinates everything — all from Telegram."
+  echo ""
+  echo "You need to create a Telegram bot for it:"
+  echo "  1. Open @BotFather on Telegram"
+  echo "  2. Send /newbot"
+  echo "  3. Name it something like 'My Supreme Agent'"
+  echo "  4. Copy the bot token"
+  echo ""
+  ask "Bot token for Supreme Agent:"
+  read -r supreme_token
+
+  if [ -z "$supreme_token" ]; then
+    warn "No Supreme token. Supreme Agent won't start until you set one."
+    warn "Set later with: tamerclaw set-token supreme <token>"
+  else
+    info "Supreme Agent token set"
+  fi
+
+  # ── Step 3: Scan for existing agents ──
   scan_agents
 
-  # ── Step 3: Select agents to link ──
+  # ── Step 4: Select agents to link ──
   local selected_agents=()
   local selected_paths=()
 
@@ -206,17 +293,13 @@ cmd_init() {
     fi
   fi
 
-  # ── Step 4: Bot tokens for each agent ──
+  # ── Step 5: Bot tokens for each selected agent ──
   echo ""
   if [ ${#selected_agents[@]} -gt 0 ]; then
-    echo -e "${BOLD}Now let's set up Telegram bots for your agents.${NC}"
+    echo -e "${BOLD}═══ Agent Telegram Setup ═══${NC}"
     echo ""
-    echo "For each agent, you need a Telegram bot token."
-    echo "Create bots via @BotFather on Telegram:"
-    echo "  1. Open @BotFather"
-    echo "  2. Send /newbot"
-    echo "  3. Choose a name and username"
-    echo "  4. Copy the token"
+    echo "Each agent needs its own Telegram bot (separate from Supreme)."
+    echo "Create one bot per agent via @BotFather."
     echo ""
   fi
 
@@ -232,19 +315,6 @@ cmd_init() {
       warn "Skipped $agent_name — you can add token later with: tamerclaw set-token $agent_name <token>"
     fi
   done
-
-  # ── Step 5: Supreme Agent token ──
-  echo ""
-  echo -e "${BOLD}Supreme Agent${NC} — your master controller."
-  echo "It manages all other agents and needs its own Telegram bot."
-  echo ""
-  ask "Bot token for Supreme Agent:"
-  read -r supreme_token
-
-  if [ -z "$supreme_token" ]; then
-    warn "No Supreme token. Supreme Agent won't start until you set one."
-    warn "Set later with: tamerclaw set-token supreme <token>"
-  fi
 
   # ── Step 6: Generate config ──
   info "Generating configuration..."
@@ -419,6 +489,18 @@ SUPTOOLSEOF
   # ── Step 8: Create systemd services ──
   info "Setting up systemd services..."
 
+  # Build PATH that includes claude binary location
+  local claude_bin_dir
+  claude_bin_dir=$(dirname "$(get_claude_path)" 2>/dev/null || echo "")
+  local svc_path="$PATH"
+  if [ -n "$claude_bin_dir" ] && [[ ":$svc_path:" != *":$claude_bin_dir:"* ]]; then
+    svc_path="$claude_bin_dir:$svc_path"
+  fi
+  # Ensure common paths are included
+  for p in "$HOME/.local/bin" "/usr/local/bin" "/usr/bin"; do
+    [[ ":$svc_path:" != *":$p:"* ]] && svc_path="$p:$svc_path"
+  done
+
   cat > /etc/systemd/system/tamerclaw-bridge.service << SVCEOF
 [Unit]
 Description=TamerClaw Bridge (Telegram ↔ Claude Code)
@@ -433,6 +515,7 @@ RestartSec=5
 Environment=NODE_ENV=production
 Environment=TAMERCLAW_HOME=$SCRIPT_DIR
 Environment=HOME=$HOME
+Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=tamerclaw-bridge
@@ -456,6 +539,7 @@ RestartSec=10
 Environment=NODE_ENV=production
 Environment=TAMERCLAW_HOME=$SCRIPT_DIR
 Environment=HOME=$HOME
+Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=tamerclaw-supreme

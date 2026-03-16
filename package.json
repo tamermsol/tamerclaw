@@ -1,6 +1,7 @@
 {
   "name": "tamerclaw",
   "version": "1.0.0",
+  "type": "module",
   "description": "Multi-agent Claude Code system with Telegram bridge",
   "bin": {
     "tamerclaw": "./tamerclaw"

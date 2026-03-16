@@ -13,11 +13,17 @@
 
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { spawn, execSync } from 'child_process';
 import TelegramBot from 'node-telegram-bot-api';
 import paths from '../shared/paths.js';
 
 // ── Config ────────────────────────────────────────────────────────────────────
+if (!fs.existsSync(paths.config)) {
+  console.error(`[FATAL] Config not found: ${paths.config}`);
+  console.error('Run: tamerclaw init');
+  process.exit(1);
+}
 const config = JSON.parse(fs.readFileSync(paths.config, 'utf-8'));
 const TOKEN = config.agents?.supreme?.botToken || '';
 const AGENT_ID = 'supreme';
@@ -308,8 +314,8 @@ function callClaude(message, chatId, mediaPath = null) {
 
     console.log(`[supreme] Processing: "${userMessage.slice(0, 100)}..."`);
 
-    const promptFile = '/tmp/claude-supreme-prompt.txt';
-    const sysFile = '/tmp/claude-supreme-sys.txt';
+    const promptFile = path.join(os.tmpdir(), 'claude-supreme-prompt.txt');
+    const sysFile = path.join(os.tmpdir(), 'claude-supreme-sys.txt');
     fs.writeFileSync(promptFile, userMessage);
     fs.writeFileSync(sysFile, systemPrompt);
 
@@ -321,7 +327,7 @@ function callClaude(message, chatId, mediaPath = null) {
     for (const key of Object.keys(env)) {
       if (key.startsWith('CLAUDE') || key === 'CLAUDECODE') delete env[key];
     }
-    env.HOME = '/root';
+    env.HOME = process.env.HOME || os.homedir();
 
     const proc = spawn('bash', ['-c', cmd], { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
     activeProcess = proc;
@@ -865,8 +871,15 @@ bot.on('message', async (msg) => {
     if (msg.document.file_name) text = `[File: ${msg.document.file_name}]\n${text}`;
   } else if (msg.voice) {
     mediaPath = await downloadMedia(msg.voice.file_id);
+    if (!text) text = '[Voice message]';
   } else if (msg.video) {
     mediaPath = await downloadMedia(msg.video.file_id);
+  } else if (msg.audio) {
+    mediaPath = await downloadMedia(msg.audio.file_id);
+    if (msg.audio.title) text = `[Audio: ${msg.audio.title}]\n${text}`;
+  } else if (msg.video_note) {
+    mediaPath = await downloadMedia(msg.video_note.file_id);
+    if (!text) text = '[Video note]';
   }
 
   if (!text && !mediaPath) return;

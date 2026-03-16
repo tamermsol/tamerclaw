@@ -8,7 +8,6 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { writeFileAtomic } from '../shared/async-fs.js';
 import paths from '../shared/paths.js';
 
 const JOBS_PATH = paths.cronJobs;

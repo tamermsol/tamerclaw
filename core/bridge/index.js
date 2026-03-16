@@ -24,9 +24,10 @@ import TelegramBot from 'node-telegram-bot-api';
 import { getDueJobs, recordRun, loadJobs } from '../cron/scheduler.js';
 import { startGateway, setBridge } from './gateway.js';
 import { enqueue, getPending, markAttempt } from './delivery-queue.js';
-import { auditEvent, readConfigAudited } from './audit-log.js';
-import { readConfigCached, writeConfigAtomic, writeFileAtomic, readJSONSafe, ensureDir, appendFile, exists as asyncExists } from '../shared/async-fs.js';
-import { createTrace, tracedLogger, stampMessage, extractTrace, newTraceId } from '../shared/trace.js';
+import { auditEvent } from './audit-log.js';
+import { readConfigCached, writeFileAtomic, readJSONSafe, ensureDir, appendFile } from '../shared/async-fs.js';
+import { createTrace, tracedLogger, newTraceId } from '../shared/trace.js';
+import os from 'os';
 import paths from '../shared/paths.js';
 
 const CONFIG_PATH = paths.config;
@@ -42,6 +43,11 @@ const agentChatIds = new Map();   // agentId → Set of known chatIds
 
 // ── Config ─────────────────────────────────────────────────────────────────
 function loadConfig() {
+  if (!fs.existsSync(CONFIG_PATH)) {
+    console.error(`[FATAL] Config not found: ${CONFIG_PATH}`);
+    console.error('Run: tamerclaw init');
+    process.exit(1);
+  }
   return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 }
 
@@ -373,7 +379,7 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
   }
 
   const agent = config.agents[agentId];
-  const cwd = agent?.legacyWorkspace || agent?.workspace || '/tmp/claude-sandbox';
+  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(os.tmpdir(), 'claude-sandbox');
   await ensureDir(cwd);
 
   log.log(`Calling ${mc.provider}/${mc.modelId} for chat ${chatId}...`);
@@ -389,7 +395,7 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
     stream: false
   };
 
-  const payloadFile = `/tmp/claude-agent-${agentId}-openai-payload.json`;
+  const payloadFile = path.join(os.tmpdir(), `claude-agent-${agentId}-openai-payload.json`);
   await fsp.writeFile(payloadFile, JSON.stringify(payload));
 
   return new Promise((resolve, reject) => {
@@ -408,7 +414,7 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
     const curlCmd = `curl -s -X POST "${endpoint}" -H "Content-Type: application/json" -H "Authorization: Bearer ${apiKey}" -d @${payloadFile}`;
 
     const env = { ...process.env };
-    env.HOME = '/root';
+    env.HOME = process.env.HOME || os.homedir();
 
     const proc = spawn('bash', ['-c', curlCmd], { cwd, env });
 
@@ -465,7 +471,7 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
 
   // Build system prompt and write to temp file (avoids arg length issues)
   const systemPrompt = await buildSystemPromptAsync(agentId);
-  const systemPromptFile = `/tmp/claude-agent-${agentId}-system.md`;
+  const systemPromptFile = path.join(os.tmpdir(), `claude-agent-${agentId}-system.md`);
   await fsp.writeFile(systemPromptFile, systemPrompt);
 
   // Build the user message
@@ -476,13 +482,13 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
 
   // Use agent's legacy workspace as cwd so Claude Code has project context
   const agent = config.agents[agentId];
-  const cwd = agent?.legacyWorkspace || agent?.workspace || '/tmp/claude-sandbox';
+  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(os.tmpdir(), 'claude-sandbox');
   await ensureDir(cwd);
 
   log.log(`Calling claude code (model: ${modelFlag}) for chat ${chatId} in ${cwd}...`);
 
   // Write prompt to temp file to avoid shell escaping issues
-  const promptFile = `/tmp/claude-agent-${agentId}-prompt.txt`;
+  const promptFile = path.join(os.tmpdir(), `claude-agent-${agentId}-prompt.txt`);
   await fsp.writeFile(promptFile, userMessage);
 
   return new Promise((resolve, reject) => {
@@ -503,7 +509,7 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
       }
     }
     // Ensure HOME is set for OAuth credential lookup
-    env.HOME = '/root';
+    env.HOME = process.env.HOME || os.homedir();
 
     const proc = spawn('claude', args, { cwd, env });
 
@@ -646,21 +652,23 @@ async function sendLongMessage(bot, chatId, text) {
       let filePath = match[1];
       // Resolve relative paths against agent workspace
       if (filePath.startsWith('./')) {
-        // Try to find the agent workspace from context
-        // The MEDIA: path is relative to the agent's root dir
-        const agentDirs = [paths.agents];
-        for (const dir of agentDirs) {
-          try {
-            const candidates = fs.readdirSync(dir).map(d => path.join(dir, d));
-            for (const candidate of candidates) {
-              const resolved = path.join(candidate, filePath.slice(2));
-              if (fs.existsSync(resolved)) {
-                filePath = resolved;
-                break;
-              }
+        // Try to resolve relative path against agent directories
+        let resolved = false;
+        try {
+          const agentNames = fs.readdirSync(paths.agents);
+          for (const agentName of agentNames) {
+            const candidate = path.join(paths.agents, agentName, filePath.slice(2));
+            if (fs.existsSync(candidate)) {
+              filePath = candidate;
+              resolved = true;
+              break;
             }
-          } catch {}
-          if (path.isAbsolute(filePath) && !filePath.startsWith('./')) break;
+          }
+        } catch {}
+        if (!resolved) {
+          // Try CWD as fallback
+          const cwdResolved = path.resolve(filePath);
+          if (fs.existsSync(cwdResolved)) filePath = cwdResolved;
         }
       }
 
@@ -784,7 +792,7 @@ function startBot(agentId, agentConfig, config) {
     const targetAgent = isShared ? (bot._currentAgent || agentId) : agentId;
     console.log(`[${targetAgent}] 📩 message: chat=${msg.chat.id} text="${(msg.text || '[media]').slice(0, 50)}" from=${msg.from?.username || msg.from?.id}`);
 
-    if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.video) return;
+    if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.video && !msg.audio && !msg.video_note) return;
 
     // Handle commands
     if (msg.text) {
@@ -857,10 +865,19 @@ function startBot(agentId, agentConfig, config) {
       try { mediaPath = await downloadMedia(bot, msg.document.file_id, targetAgent); }
       catch (e) { console.error(`[${targetAgent}] Media download failed:`, e.message); }
     } else if (msg.voice) {
-      try { mediaPath = await downloadMedia(bot, msg.voice.file_id, targetAgent); }
+      try {
+        mediaPath = await downloadMedia(bot, msg.voice.file_id, targetAgent);
+        if (!text) text = '[Voice message]';
+      }
       catch (e) { console.error(`[${targetAgent}] Media download failed:`, e.message); }
     } else if (msg.video) {
       try { mediaPath = await downloadMedia(bot, msg.video.file_id, targetAgent); }
+      catch (e) { console.error(`[${targetAgent}] Media download failed:`, e.message); }
+    } else if (msg.audio) {
+      try { mediaPath = await downloadMedia(bot, msg.audio.file_id, targetAgent); }
+      catch (e) { console.error(`[${targetAgent}] Media download failed:`, e.message); }
+    } else if (msg.video_note) {
+      try { mediaPath = await downloadMedia(bot, msg.video_note.file_id, targetAgent); }
       catch (e) { console.error(`[${targetAgent}] Media download failed:`, e.message); }
     }
 
