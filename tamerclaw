@@ -64,7 +64,7 @@ check_prereqs() {
   info "Prerequisites OK (Node.js $(node -v), Claude CLI found)"
 }
 
-# ── Claude Code Auth Check ────────────────────────────────────────────────────
+# ── Claude Code Auth Check & Login ────────────────────────────────────────────
 check_claude_auth() {
   echo ""
   info "Checking Claude Code authentication..."
@@ -78,33 +78,40 @@ check_claude_auth() {
     return 0
   fi
 
-  # Not authenticated — guide the user
-  warn "Claude Code is not authenticated yet."
+  # Not authenticated — launch the login flow directly
+  warn "Claude Code is not logged in. Starting login..."
   echo ""
-  echo -e "  ${BOLD}You need to log in to Claude Code first.${NC}"
+  echo -e "  ${BOLD}Claude Code needs to authenticate with your Anthropic account.${NC}"
+  echo "  A browser window will open for you to log in."
+  echo "  If no browser opens, follow the URL shown in the terminal."
   echo ""
-  echo "  Run this command in a separate terminal:"
-  echo ""
-  echo -e "    ${CYAN}claude${NC}"
-  echo ""
-  echo "  This will open a browser for authentication."
-  echo "  Once logged in, come back here and continue."
-  echo ""
-  ask "Press Enter when you've logged in to Claude Code (or 'skip' to continue without):"
+  ask "Press Enter to start Claude Code login (or 'skip' to do it later):"
   read -r auth_response
 
   if [ "$auth_response" = "skip" ]; then
-    warn "Skipping auth check. Agents won't work until Claude Code is authenticated."
+    warn "Skipping login. Agents won't work until you run: claude"
     return 0
   fi
 
-  # Re-test
+  # Launch claude login — this opens the browser OAuth flow
+  # We use /dev/tty to ensure interactive terminal access
+  echo ""
+  info "Launching Claude Code login..."
+  echo -e "  ${CYAN}(Complete the login in your browser, then it will return here)${NC}"
+  echo ""
+
+  # Run claude interactively — it will handle OAuth and return
+  claude </dev/tty >/dev/tty 2>&1 || true
+
+  echo ""
+
+  # Verify login worked
   auth_test=$(echo "respond with just OK" | claude -p --output-format text 2>&1) || true
   if echo "$auth_test" | grep -qi "OK"; then
-    info "Claude Code is authenticated and working"
+    info "Claude Code is authenticated and working!"
   else
-    warn "Claude Code still not responding. Check authentication and try again."
-    warn "Continuing setup — you can fix auth later."
+    warn "Login may not have completed. You can retry later by running: claude"
+    warn "Continuing setup — agents need authentication to work."
   fi
 }
 
