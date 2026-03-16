@@ -1,0 +1,23 @@
+# User data — never committed
+user/config.json
+user/agents/
+user/credentials/
+user/sessions/
+user/logs/
+user/delivery-queue/
+user/cron/runs/
+user/cron/jobs.json
+
+# Node
+node_modules/
+core/bridge/node_modules/
+core/relay/node_modules/
+core/supreme/node_modules/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Lockfiles generated locally
+package-lock.json

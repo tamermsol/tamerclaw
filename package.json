@@ -1,0 +1,10 @@
+{
+  "name": "tamerclaw",
+  "version": "1.0.0",
+  "description": "Multi-agent Claude Code system with Telegram bridge",
+  "bin": {
+    "tamerclaw": "./tamerclaw"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
