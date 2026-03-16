@@ -850,10 +850,28 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  // Handle /help
+  if (msg.text === '/help') {
+    bot.sendMessage(chatId,
+      '👑 *Supreme Agent — Commands*\n\n' +
+      '/help — Show this help\n' +
+      '/status — System status (uptime, memory, call count)\n' +
+      '/agents — List all managed agents\n' +
+      '/stop — Cancel current running task\n\n' +
+      'Just send a message to give me a task. I can:\n' +
+      '• Manage and configure all agents\n' +
+      '• Fix bugs, create new agents\n' +
+      '• Run shell commands, edit files\n' +
+      '• Accept text, photos, voice notes, documents',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // Handle /start
   if (msg.text?.startsWith('/start')) {
     bot.sendMessage(chatId,
-      '👑 *Supreme Agent Online*\n\nI am the master controller of the TamerClaw ecosystem.\n\nCommands:\n• /status — System status\n• /agents — List all agents\n• /stop — Stop current task\n\nOr just tell me what you need.',
+      '👑 *Supreme Agent Online*\n\nI am the master controller of the TamerClaw ecosystem.\n\nType /help for commands, or just tell me what you need.',
       { parse_mode: 'Markdown' }
     );
     return;

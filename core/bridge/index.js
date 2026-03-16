@@ -802,10 +802,23 @@ function startBot(agentId, agentConfig, config) {
           ? `Available agents: ${[...bot._sharedAgents].join(', ')}\nUse /switch <agent> to change.`
           : '';
         await bot.sendMessage(msg.chat.id,
-          `🤖 *${targetAgent}* agent online.\nPowered by Claude Code.\n\n${agentListStr}\nSend me anything and I'll help.`,
+          `🤖 *${targetAgent}* agent online.\nPowered by Claude Code.\n\n${agentListStr}\nSend me anything and I'll help.\n\nType /help for commands.`,
           { parse_mode: 'Markdown' }
         );
         savePairing(targetAgent, msg.from.id, msg.from.username);
+        return;
+      }
+
+      // /help command
+      if (msg.text === '/help') {
+        await bot.sendMessage(msg.chat.id,
+          `*${targetAgent}* — Commands\n\n` +
+          `/help — Show this help\n` +
+          `/status — System status\n` +
+          `/agents — List all agents\n\n` +
+          `Just send a message to talk to me. I can handle text, photos, voice notes, documents, and video.`,
+          { parse_mode: 'Markdown' }
+        );
         return;
       }
 
