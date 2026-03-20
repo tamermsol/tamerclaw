@@ -229,14 +229,27 @@ export async function prepareBroadcast(text, voiceConfig) {
 
   const deliverables = [];
 
-  for (const seg of segments) {
+  // Collect voice segments for context continuity
+  const voiceSegments = segments.filter(s => s.type === 'voice');
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
     if (seg.type === 'voice') {
+      // Find this segment's index among voice-only segments for context
+      const voiceIdx = voiceSegments.indexOf(seg);
+      const prevVoice = voiceIdx > 0 ? voiceSegments[voiceIdx - 1].content : null;
+      const nextVoice = voiceIdx < voiceSegments.length - 1 ? voiceSegments[voiceIdx + 1].content : null;
+
       try {
         const audioPath = await textToSpeech(seg.content, {
           voice: voiceConfig.voice || 'josh',
           provider: voiceConfig.provider || undefined,
           model: voiceConfig.model || 'flash',
           settings: voiceConfig.settings || undefined,
+          // Context continuity — pass adjacent chunks so ElevenLabs
+          // maintains consistent prosody across the full message
+          previousText: prevVoice,
+          nextText: nextVoice,
         });
         deliverables.push({
           type: 'voice',
@@ -245,7 +258,6 @@ export async function prepareBroadcast(text, voiceConfig) {
         });
       } catch (err) {
         console.error(`[smart-broadcast] TTS failed for segment, converting to text:`, err.message);
-        // Fallback: deliver as text
         deliverables.push({ type: 'text', content: seg.content });
       }
     } else {

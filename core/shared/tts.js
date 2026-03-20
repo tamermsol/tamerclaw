@@ -55,6 +55,8 @@ const DEFAULT_EDGE_VOICE = 'en-US-GuyNeural';
  * @param {string} [options.rate] - Edge TTS speech rate
  * @param {string} [options.pitch] - Edge TTS pitch adjustment
  * @param {object} [options.settings] - ElevenLabs voice settings overrides
+ * @param {string} [options.previousText] - Previous chunk for context continuity
+ * @param {string} [options.nextText] - Next chunk for context continuity
  * @returns {Promise<string>} Path to generated OGG audio file
  */
 export async function textToSpeech(text, options = {}) {
@@ -67,6 +69,8 @@ export async function textToSpeech(text, options = {}) {
         model: options.model || 'flash',
         outputDir: options.outputDir,
         settings: options.settings,
+        previousText: options.previousText || null,
+        nextText: options.nextText || null,
       });
     } catch (err) {
       console.warn(`[tts] ElevenLabs failed, falling back to Edge TTS: ${err.message}`);
@@ -117,17 +121,21 @@ async function edgeTTS(text, options = {}) {
 
     if (!existsSync(mp3Path)) throw new Error('edge-tts produced no output file');
 
-    // Enhanced audio pipeline: warmth EQ, compression, loudness normalization
+    // Broadcast-quality audio pipeline (matched to ElevenLabs post-processing)
     const audioFilters = [
       'highpass=f=80',
-      'equalizer=f=250:t=q:w=1.5:g=2',
-      'equalizer=f=500:t=q:w=2:g=-1',
-      'equalizer=f=3000:t=q:w=1.5:g=1.5',
-      'acompressor=threshold=0.03:ratio=4:attack=5:release=100:makeup=2',
-      'loudnorm=I=-16:LRA=11:TP=-1.5',
+      'equalizer=f=6500:t=q:w=2:g=-3',          // de-ess sibilance
+      'equalizer=f=250:t=q:w=1.2:g=2.5',         // warmth
+      'equalizer=f=500:t=q:w=2:g=-1.5',           // mud cut
+      'equalizer=f=3000:t=q:w=1.5:g=2',           // presence
+      'equalizer=f=8000:t=q:w=2:g=-1',             // harsh freq cut
+      'equalizer=f=12000:t=q:w=0.7:g=1.5',        // air/shimmer
+      'acompressor=threshold=0.025:ratio=3.5:attack=3:release=80:makeup=1.5:knee=6',
+      'alimiter=limit=0.95:level=false',
+      'loudnorm=I=-16:LRA=9:TP=-1.5',
     ].join(',');
     await execAsync(
-      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 64k -vbr on -compression_level 10 -application voip "${oggPath}"`,
+      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 96k -vbr on -compression_level 10 -application voip "${oggPath}"`,
       { timeout: 30_000 }
     );
 
