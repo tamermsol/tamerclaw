@@ -128,10 +128,11 @@ async function edgeTTS(text, options = {}) {
       'equalizer=f=250:t=q:w=1.2:g=2.5',         // warmth
       'equalizer=f=500:t=q:w=2:g=-1.5',           // mud cut
       'equalizer=f=3000:t=q:w=1.5:g=2',           // presence
-      'equalizer=f=8000:t=q:w=2:g=-1',             // harsh freq cut
-      'equalizer=f=12000:t=q:w=0.7:g=1.5',        // air/shimmer
-      'acompressor=threshold=0.025:ratio=3.5:attack=3:release=80:makeup=1.5:knee=6',
-      'alimiter=limit=0.95:level=false',
+      'equalizer=f=8000:t=q:w=2:g=-1.5',          // harsh freq cut
+      'equalizer=f=12000:t=q:w=2:g=-2',           // cut high ringing (was boost — caused whistle)
+      'lowpass=f=13000:p=1',                       // gentle rolloff above 13kHz
+      'acompressor=threshold=0.03:ratio=3:attack=5:release=100:makeup=1:knee=8',
+      'alimiter=limit=0.93:level=false',
       'loudnorm=I=-16:LRA=9:TP=-1.5',
     ].join(',');
     await execAsync(

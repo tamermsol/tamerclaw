@@ -253,12 +253,13 @@ export async function elevenLabsTTS(text, options = {}) {
       'equalizer=f=250:t=q:w=1.2:g=2.5',      // warmth: boost low-mids for richness
       'equalizer=f=500:t=q:w=2:g=-1.5',        // mud cut: reduce boxiness
       'equalizer=f=3000:t=q:w=1.5:g=2',        // presence: clarity boost
-      'equalizer=f=8000:t=q:w=2:g=-1',          // harsh freq reduction
-      'equalizer=f=12000:t=q:w=0.7:g=1.5',     // air: high-shelf shimmer
-      // Dynamic processing
-      'acompressor=threshold=0.025:ratio=3.5:attack=3:release=80:makeup=1.5:knee=6',
+      'equalizer=f=8000:t=q:w=2:g=-2',            // harsh freq reduction
+      'equalizer=f=12000:t=q:w=2:g=-2',           // cut high ringing (no more boost — killed whistle)
+      'lowpass=f=13000:p=1',                       // gentle rolloff above 13kHz (was 14k/p=2 — too resonant)
+      // Dynamic processing — softer compression to avoid pumping artifacts
+      'acompressor=threshold=0.03:ratio=3:attack=5:release=100:makeup=1:knee=8',
       // Limiter to prevent clipping
-      'alimiter=limit=0.95:level=false',
+      'alimiter=limit=0.93:level=false',
       // Broadcast loudness normalization
       'loudnorm=I=-16:LRA=9:TP=-1.5',
     ].join(',');
