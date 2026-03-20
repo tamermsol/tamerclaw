@@ -120,7 +120,7 @@ export async function textToSpeech(text, options = {}) {
 /**
  * Strip markdown and special formatting so TTS reads naturally
  */
-function sanitizeForTTS(text) {
+export function sanitizeForTTS(text) {
   return text
     // Remove code blocks
     .replace(/```[\s\S]*?```/g, ' (code block omitted) ')

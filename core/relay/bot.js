@@ -23,6 +23,7 @@ import { newTraceId } from '../shared/trace.js';
 import { transcribeAudio } from '../shared/transcribe.js';
 import { textToSpeech, getVoicePresets } from '../shared/tts.js';
 import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, getActiveChats } from '../shared/voice-mode.js';
+import { prepareBroadcast, analyzeResponse } from '../shared/smart-broadcast.js';
 
 // ── Config-based token loading ───────────────────────────────────────────────
 function loadConfig() {
@@ -475,24 +476,30 @@ setInterval(async () => {
             // Check if voice mode is active for this chat
             const voiceConfig = getVoiceMode(data.chatId);
             if (voiceConfig && !data.skipVoice) {
-              // Voice mode: convert response to audio and send
+              // Smart voice broadcast — analyzes content and delivers optimally
               try {
-                bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
-                const oggPath = await textToSpeech(data.text, { voice: voiceConfig.voice });
-                const voiceResult = await bot.sendVoice(data.chatId, oggPath);
-                if (voiceResult) {
-                  console.log(`${traceTag}-> ${data.chatId} [VOICE]: ${data.text.slice(0, 60)}...`);
+                const deliverables = await prepareBroadcast(data.text, voiceConfig);
+                let voiceSent = false;
+
+                for (const item of deliverables) {
+                  if (item.type === 'voice' && item.audioPath) {
+                    bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
+                    const voiceResult = await bot.sendVoice(data.chatId, item.audioPath);
+                    if (voiceResult) voiceSent = true;
+                    // Clean up temp file
+                    try { fs.unlinkSync(item.audioPath); } catch {}
+                  } else if (item.type === 'text') {
+                    await sendLongMessage(data.chatId, item.content);
+                  }
+                }
+
+                if (voiceSent || deliverables.some(d => d.type === 'text')) {
+                  console.log(`${traceTag}-> ${data.chatId} [SMART-VOICE]: ${deliverables.filter(d => d.type === 'voice').length} voice + ${deliverables.filter(d => d.type === 'text').length} text segments`);
                   sent = true;
-                  // Clean up temp file
-                  try { (await import('fs')).unlinkSync(oggPath); } catch {}
                 }
-                // Also send text if textToo is enabled
-                if (voiceConfig.textToo && data.text.length > 0) {
-                  await sendLongMessage(data.chatId, data.text);
-                }
-              } catch (ttsErr) {
-                console.error(`${traceTag}[tts] Voice generation failed, falling back to text:`, ttsErr.message);
-                // Fallback to text
+              } catch (broadcastErr) {
+                console.error(`${traceTag}[smart-broadcast] Failed, falling back to text:`, broadcastErr.message);
+                // Fallback to plain text
                 const result = await sendLongMessage(data.chatId, data.text);
                 if (result !== null) sent = true;
               }
