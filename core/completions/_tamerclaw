@@ -1,0 +1,73 @@
+#compdef tamerclaw
+# Zsh completions for TamerClaw CLI
+# Install: symlink or copy to a directory in your $fpath
+
+_tamerclaw() {
+    local -a commands
+    commands=(
+        'init:Initialize TamerClaw (interactive wizard)'
+        'update:Pull latest updates and restart services'
+        'start:Start services (bridge|supreme|all)'
+        'stop:Stop services'
+        'restart:Restart services'
+        'status:Show system status'
+        'logs:Tail service logs'
+        'agents:List all configured agents'
+        'add-agent:Add a new agent'
+        'set-token:Set Telegram bot token for an agent'
+        'test:Test Telegram bot connections'
+        'test-claude:Verify Claude CLI works'
+        'send:Send a message to an agent via gateway'
+        'cron-list:List scheduled cron jobs'
+        'version:Show version'
+        'help:Show help'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe -t commands 'tamerclaw command' commands
+            ;;
+        args)
+            local -a targets agents
+            targets=(bridge supreme all)
+
+            case "${words[1]}" in
+                start)
+                    _describe -t targets 'target' targets
+                    _arguments '--foreground[Run in foreground]'
+                    ;;
+                stop|restart)
+                    _describe -t targets 'target' targets
+                    ;;
+                logs)
+                    _describe -t targets 'target' targets
+                    ;;
+                set-token|test|send)
+                    # Try to read agents from config
+                    local home="${TAMERCLAW_HOME:-${0:A:h:h:h}}"
+                    local config="$home/user/config.json"
+                    if [[ -r "$config" ]] && (( $+commands[node] )); then
+                        agents=( ${(f)"$(node -e "
+                            const c=JSON.parse(require('fs').readFileSync('$config','utf-8'));
+                            console.log(Object.keys(c.agents).join('\n'));
+                        " 2>/dev/null)"} )
+                        _describe -t agents 'agent' agents
+                    fi
+                    ;;
+                add-agent)
+                    if (( CURRENT == 2 )); then
+                        _message 'agent name'
+                    elif (( CURRENT == 3 )); then
+                        _directories
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_tamerclaw "$@"

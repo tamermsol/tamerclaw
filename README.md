@@ -97,7 +97,8 @@ tamerclaw/
 │   ├── bridge/            # Telegram ↔ Claude Code bridge + HTTP gateway
 │   ├── supreme/           # Supreme Agent (standalone meta-controller)
 │   ├── cron/              # Job scheduler
-│   └── shared/            # Path resolver, async-fs, tracing, policies
+│   ├── shared/            # Path resolver, async-fs, tracing, policies
+│   └── completions/       # Bash and Zsh tab completions
 └── user/                  # Generated per-user (never overwritten on update)
     ├── config.json        # System configuration
     ├── agents/            # Agent data (identity, memory, sessions)
@@ -175,6 +176,33 @@ After init, your config lives at `user/config.json`. Key settings:
 | `cron.tickIntervalMs` | `30000` | How often to check cron jobs |
 
 Per-agent model override: set `agents.<id>.model` to `claude-opus-4-6`, `claude-sonnet-4-6`, or `claude-haiku-4-5`.
+
+## Shell Completions
+
+Tab completion for the `tamerclaw` CLI:
+
+**Bash:**
+```bash
+source /path/to/tamerclaw/core/completions/tamerclaw.bash
+# Or add to ~/.bashrc for permanent use
+```
+
+**Zsh:**
+```bash
+# Copy or symlink to your fpath
+cp /path/to/tamerclaw/core/completions/_tamerclaw /usr/local/share/zsh/site-functions/
+# Then: compinit
+```
+
+Completions support all commands, service targets, and dynamic agent ID lookup from your config.
+
+## Testing
+
+Run the memory database test suite:
+
+```bash
+cd core/shared && node memory-db.test.js
+```
 
 ## Security
 
