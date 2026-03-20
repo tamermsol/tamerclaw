@@ -21,6 +21,8 @@ import { execSync } from 'child_process';
 import paths from '../shared/paths.js';
 import { newTraceId } from '../shared/trace.js';
 import { transcribeAudio } from '../shared/transcribe.js';
+import { textToSpeech, getVoicePresets } from '../shared/tts.js';
+import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, getActiveChats } from '../shared/voice-mode.js';
 
 // ── Config-based token loading ───────────────────────────────────────────────
 function loadConfig() {
@@ -162,6 +164,18 @@ bot.sendDocument = async function(chatId, doc, opts) {
   }
 };
 
+// Wrap bot.sendVoice to respect rate limits
+const _origSendVoice = bot.sendVoice.bind(bot);
+bot.sendVoice = async function(chatId, voice, opts) {
+  if (isRateLimited()) return null;
+  try {
+    return await _origSendVoice(chatId, voice, opts);
+  } catch (err) {
+    if (handleRateLimit(err)) return null;
+    throw err;
+  }
+};
+
 // ── Dedup Cache ──────────────────────────────────────────────────────────────
 // Prevents the same message from being sent to the same chat twice within 30s.
 // Key = chatId + hash(text first 200 chars), Value = timestamp.
@@ -257,6 +271,82 @@ async function downloadMedia(fileId, agentId) {
     return null;
   }
 }
+
+// ── Voice Conversation Commands ───────────────────────────────────────────────
+
+bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const args = (match[1] || '').trim().toLowerCase();
+
+  if (!args || args === 'on') {
+    enableVoiceMode(chatId);
+    await bot.sendMessage(chatId, '🎙 Voice mode ON — I\'ll respond with voice messages now.\n\nCommands:\n/voice off — disable\n/voice set <voice> — change voice\n/voice voices — list presets\n/voice textoff — voice only (no text)\n/voice texton — voice + text (default)');
+    return;
+  }
+
+  if (args === 'off') {
+    disableVoiceMode(chatId);
+    await bot.sendMessage(chatId, '🔇 Voice mode OFF — back to text responses.');
+    return;
+  }
+
+  if (args === 'status') {
+    const mode = getVoiceMode(chatId);
+    if (mode) {
+      await bot.sendMessage(chatId, `🎙 Voice mode: ON\nVoice: ${mode.voice}\nText alongside: ${mode.textToo ? 'yes' : 'no'}\nSince: ${mode.enabledAt}`);
+    } else {
+      await bot.sendMessage(chatId, '🔇 Voice mode: OFF\nUse /voice on to enable');
+    }
+    return;
+  }
+
+  if (args.startsWith('set ')) {
+    const voiceName = args.slice(4).trim();
+    const presets = getVoicePresets();
+    if (presets[voiceName]) {
+      setVoice(chatId, voiceName);
+      await bot.sendMessage(chatId, `🎙 Voice changed to: ${voiceName} (${presets[voiceName]})`);
+    } else {
+      // Try as raw voice name
+      setVoice(chatId, voiceName);
+      await bot.sendMessage(chatId, `🎙 Voice set to: ${voiceName}`);
+    }
+    return;
+  }
+
+  if (args === 'voices') {
+    const presets = getVoicePresets();
+    const list = Object.entries(presets).map(([k, v]) => `• ${k} → ${v}`).join('\n');
+    await bot.sendMessage(chatId, `🎙 Voice Presets:\n${list}\n\nUse: /voice set <preset>\nOr use any full Edge TTS voice name.`);
+    return;
+  }
+
+  if (args === 'textoff') {
+    const mode = getVoiceMode(chatId);
+    if (mode) {
+      const { setTextMode } = await import('../shared/voice-mode.js');
+      setTextMode(chatId, false);
+      await bot.sendMessage(chatId, '🎙 Text mode OFF — voice only responses.');
+    } else {
+      await bot.sendMessage(chatId, '⚠️ Voice mode not active. Use /voice on first.');
+    }
+    return;
+  }
+
+  if (args === 'texton') {
+    const mode = getVoiceMode(chatId);
+    if (mode) {
+      const { setTextMode } = await import('../shared/voice-mode.js');
+      setTextMode(chatId, true);
+      await bot.sendMessage(chatId, '🎙 Text mode ON — you\'ll get voice + text.');
+    } else {
+      await bot.sendMessage(chatId, '⚠️ Voice mode not active. Use /voice on first.');
+    }
+    return;
+  }
+
+  await bot.sendMessage(chatId, '🎙 Voice Commands:\n/voice on — enable voice mode\n/voice off — disable\n/voice status — check current state\n/voice set <voice> — change voice preset\n/voice voices — list available presets\n/voice textoff — voice only\n/voice texton — voice + text');
+});
 
 // ── Incoming Messages ────────────────────────────────────────────────────────
 
@@ -355,7 +445,9 @@ setInterval(async () => {
     const content = await fsp.readFile(PROCESSING_FILE, 'utf-8');
     const data = JSON.parse(content);
     if (data.chatId) {
-      bot.sendChatAction(data.chatId, 'typing').catch(() => {});
+      const voiceConfig = getVoiceMode(data.chatId);
+      const action = voiceConfig ? 'record_voice' : 'typing';
+      bot.sendChatAction(data.chatId, action).catch(() => {});
     }
   } catch {}
 }, 4000);
@@ -380,10 +472,37 @@ setInterval(async () => {
           if (isDuplicate(data.chatId, data.text)) {
             sent = true; // Mark as sent so the file gets deleted
           } else {
-            const result = await sendLongMessage(data.chatId, data.text);
-            if (result !== null) {
-              console.log(`${traceTag}-> ${data.chatId}: ${data.text.slice(0, 80)}...`);
-              sent = true;
+            // Check if voice mode is active for this chat
+            const voiceConfig = getVoiceMode(data.chatId);
+            if (voiceConfig && !data.skipVoice) {
+              // Voice mode: convert response to audio and send
+              try {
+                bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
+                const oggPath = await textToSpeech(data.text, { voice: voiceConfig.voice });
+                const voiceResult = await bot.sendVoice(data.chatId, oggPath);
+                if (voiceResult) {
+                  console.log(`${traceTag}-> ${data.chatId} [VOICE]: ${data.text.slice(0, 60)}...`);
+                  sent = true;
+                  // Clean up temp file
+                  try { (await import('fs')).unlinkSync(oggPath); } catch {}
+                }
+                // Also send text if textToo is enabled
+                if (voiceConfig.textToo && data.text.length > 0) {
+                  await sendLongMessage(data.chatId, data.text);
+                }
+              } catch (ttsErr) {
+                console.error(`${traceTag}[tts] Voice generation failed, falling back to text:`, ttsErr.message);
+                // Fallback to text
+                const result = await sendLongMessage(data.chatId, data.text);
+                if (result !== null) sent = true;
+              }
+            } else {
+              // Standard text mode
+              const result = await sendLongMessage(data.chatId, data.text);
+              if (result !== null) {
+                console.log(`${traceTag}-> ${data.chatId}: ${data.text.slice(0, 80)}...`);
+                sent = true;
+              }
             }
           }
         }
@@ -651,6 +770,16 @@ setInterval(async () => {
         if (sent && sent.message_id) {
           if (data.done) {
             console.log(`Stream complete (single send) -> ${data.chatId}`);
+            // Send voice if voice mode active
+            const singleVoiceConfig = getVoiceMode(data.chatId);
+            if (singleVoiceConfig && data.text) {
+              try {
+                bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
+                const singleOgg = await textToSpeech(data.text, { voice: singleVoiceConfig.voice });
+                await bot.sendVoice(data.chatId, singleOgg);
+                try { (await import('fs')).unlinkSync(singleOgg); } catch {}
+              } catch (e) { console.error('[tts] Single-send voice failed:', e.message); }
+            }
             try { await fsp.unlink(filePath); } catch {}
             // Clean sidecar too
             try { await fsp.unlink(filePath.replace('.json', '.msgid')); } catch {}
@@ -672,6 +801,19 @@ setInterval(async () => {
 
       if (data.done) {
         console.log(`Stream complete (final edit) -> ${data.chatId}`);
+        // Send voice version if voice mode is active
+        const streamVoiceConfig = getVoiceMode(data.chatId);
+        if (streamVoiceConfig && data.text) {
+          try {
+            bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
+            const streamOgg = await textToSpeech(data.text, { voice: streamVoiceConfig.voice });
+            await bot.sendVoice(data.chatId, streamOgg);
+            try { (await import('fs')).unlinkSync(streamOgg); } catch {}
+            console.log(`Stream voice sent -> ${data.chatId}`);
+          } catch (ttsErr) {
+            console.error('[tts] Stream voice failed:', ttsErr.message);
+          }
+        }
         try { await fsp.unlink(filePath); } catch {}
         try { await fsp.unlink(filePath.replace('.json', '.msgid')); } catch {}
       }
