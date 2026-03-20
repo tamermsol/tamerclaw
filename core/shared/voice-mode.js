@@ -42,19 +42,23 @@ function saveState() {
  * Enable voice mode for a chat
  * @param {string|number} chatId
  * @param {object} [options]
- * @param {string} [options.voice] - Voice preset (e.g. 'en-male', 'ar-male')
+ * @param {string} [options.voice] - Voice preset (e.g. 'josh', 'rachel', 'en-male')
+ * @param {string} [options.provider] - TTS provider: 'elevenlabs' or 'edge' (auto if omitted)
+ * @param {string} [options.model] - ElevenLabs model: 'flash', 'quality', 'v3'
  * @param {boolean} [options.textToo] - Also send text alongside voice (default: true)
  */
 export function enableVoiceMode(chatId, options = {}) {
   const id = String(chatId);
   state.chats[id] = {
     enabled: true,
-    voice: options.voice || 'en-casual',
+    voice: options.voice || 'josh',
+    provider: options.provider || null, // null = auto-detect
+    model: options.model || 'flash',
     textToo: options.textToo !== false, // default true
     enabledAt: new Date().toISOString(),
   };
   saveState();
-  console.log(`[voice-mode] Enabled for chat ${id} (voice: ${state.chats[id].voice})`);
+  console.log(`[voice-mode] Enabled for chat ${id} (voice: ${state.chats[id].voice}, provider: ${state.chats[id].provider || 'auto'})`);
 }
 
 /**
@@ -99,6 +103,32 @@ export function setVoice(chatId, voice) {
 }
 
 /**
+ * Set TTS provider for a chat
+ * @param {string|number} chatId
+ * @param {string} provider - 'elevenlabs', 'edge', or null for auto
+ */
+export function setProvider(chatId, provider) {
+  const id = String(chatId);
+  if (!state.chats[id]) return;
+  state.chats[id].provider = provider;
+  saveState();
+  console.log(`[voice-mode] Provider changed for chat ${id}: ${provider || 'auto'}`);
+}
+
+/**
+ * Set ElevenLabs model for a chat
+ * @param {string|number} chatId
+ * @param {string} model - 'flash', 'quality', or 'v3'
+ */
+export function setModel(chatId, model) {
+  const id = String(chatId);
+  if (!state.chats[id]) return;
+  state.chats[id].model = model;
+  saveState();
+  console.log(`[voice-mode] Model changed for chat ${id}: ${model}`);
+}
+
+/**
  * Toggle text alongside voice
  * @param {string|number} chatId
  * @param {boolean} textToo
@@ -124,6 +154,8 @@ export default {
   disableVoiceMode,
   getVoiceMode,
   setVoice,
+  setProvider,
+  setModel,
   setTextMode,
   getActiveChats,
 };

@@ -233,7 +233,10 @@ export async function prepareBroadcast(text, voiceConfig) {
     if (seg.type === 'voice') {
       try {
         const audioPath = await textToSpeech(seg.content, {
-          voice: voiceConfig.voice || 'en-casual',
+          voice: voiceConfig.voice || 'josh',
+          provider: voiceConfig.provider || undefined,
+          model: voiceConfig.model || 'flash',
+          settings: voiceConfig.settings || undefined,
         });
         deliverables.push({
           type: 'voice',

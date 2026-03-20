@@ -22,7 +22,9 @@ import paths from '../shared/paths.js';
 import { newTraceId } from '../shared/trace.js';
 import { transcribeAudio } from '../shared/transcribe.js';
 import { textToSpeech, getVoicePresets } from '../shared/tts.js';
-import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, getActiveChats } from '../shared/voice-mode.js';
+import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, setProvider, setModel, getActiveChats } from '../shared/voice-mode.js';
+import { getActiveProvider } from '../shared/tts.js';
+import { isAvailable as elevenLabsAvailable, getVoicePresets as getElevenLabsPresets } from '../shared/tts-elevenlabs.js';
 import { prepareBroadcast, analyzeResponse } from '../shared/smart-broadcast.js';
 
 // ── Config-based token loading ───────────────────────────────────────────────
@@ -280,8 +282,23 @@ bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
   const args = (match[1] || '').trim().toLowerCase();
 
   if (!args || args === 'on') {
-    enableVoiceMode(chatId);
-    await bot.sendMessage(chatId, '🎙 Voice mode ON — I\'ll respond with voice messages now.\n\nCommands:\n/voice off — disable\n/voice set <voice> — change voice\n/voice voices — list presets\n/voice textoff — voice only (no text)\n/voice texton — voice + text (default)');
+    const has11labs = await elevenLabsAvailable();
+    enableVoiceMode(chatId, {
+      voice: has11labs ? 'josh' : 'en-casual',
+      provider: has11labs ? 'elevenlabs' : 'edge',
+    });
+    const engine = has11labs ? 'ElevenLabs' : 'Edge TTS';
+    await bot.sendMessage(chatId,
+      `🎙 Voice mode ON (${engine})\n\n` +
+      'Commands:\n' +
+      '/voice off — disable\n' +
+      '/voice set <voice> — change voice\n' +
+      '/voice voices — list presets\n' +
+      '/voice engine <elevenlabs|edge> — switch TTS engine\n' +
+      '/voice model <flash|quality|v3> — ElevenLabs model\n' +
+      '/voice textoff — voice only\n' +
+      '/voice texton — voice + text'
+    );
     return;
   }
 
@@ -294,7 +311,15 @@ bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
   if (args === 'status') {
     const mode = getVoiceMode(chatId);
     if (mode) {
-      await bot.sendMessage(chatId, `🎙 Voice mode: ON\nVoice: ${mode.voice}\nText alongside: ${mode.textToo ? 'yes' : 'no'}\nSince: ${mode.enabledAt}`);
+      const activeProvider = mode.provider || await getActiveProvider();
+      await bot.sendMessage(chatId,
+        `🎙 Voice mode: ON\n` +
+        `• Engine: ${activeProvider}\n` +
+        `• Voice: ${mode.voice}\n` +
+        `• Model: ${mode.model || 'flash'}\n` +
+        `• Text alongside: ${mode.textToo ? 'yes' : 'no'}\n` +
+        `• Since: ${mode.enabledAt}`
+      );
     } else {
       await bot.sendMessage(chatId, '🔇 Voice mode: OFF\nUse /voice on to enable');
     }
@@ -303,22 +328,72 @@ bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
 
   if (args.startsWith('set ')) {
     const voiceName = args.slice(4).trim();
-    const presets = getVoicePresets();
-    if (presets[voiceName]) {
-      setVoice(chatId, voiceName);
-      await bot.sendMessage(chatId, `🎙 Voice changed to: ${voiceName} (${presets[voiceName]})`);
-    } else {
-      // Try as raw voice name
-      setVoice(chatId, voiceName);
-      await bot.sendMessage(chatId, `🎙 Voice set to: ${voiceName}`);
-    }
+    setVoice(chatId, voiceName);
+    await bot.sendMessage(chatId, `🎙 Voice set to: ${voiceName}`);
     return;
   }
 
   if (args === 'voices') {
-    const presets = getVoicePresets();
-    const list = Object.entries(presets).map(([k, v]) => `• ${k} → ${v}`).join('\n');
-    await bot.sendMessage(chatId, `🎙 Voice Presets:\n${list}\n\nUse: /voice set <preset>\nOr use any full Edge TTS voice name.`);
+    const mode = getVoiceMode(chatId);
+    const provider = mode?.provider || await getActiveProvider();
+
+    let msg_text = '🎙 Available Voices:\n\n';
+
+    if (provider === 'elevenlabs') {
+      const presets = getElevenLabsPresets();
+      msg_text += '🔷 ElevenLabs:\n';
+      msg_text += presets.map(v => `• ${v.key} — ${v.description}`).join('\n');
+      msg_text += '\n\n💡 Use /voice engine edge to see Edge TTS voices';
+    } else {
+      const edgePresets = getVoicePresets();
+      const edgeList = Object.entries(edgePresets.edge || {}).map(([k, v]) => `• ${k} → ${v}`).join('\n');
+      msg_text += '⚪ Edge TTS:\n' + edgeList;
+      msg_text += '\n\n💡 Use /voice engine elevenlabs for premium voices';
+    }
+
+    msg_text += '\n\nUse: /voice set <name>';
+    await bot.sendMessage(chatId, msg_text);
+    return;
+  }
+
+  if (args.startsWith('engine ') || args.startsWith('provider ')) {
+    const engineName = args.split(' ')[1]?.trim();
+    if (engineName === 'elevenlabs' || engineName === '11labs') {
+      const has11labs = await elevenLabsAvailable();
+      if (!has11labs) {
+        await bot.sendMessage(chatId, '⚠️ ElevenLabs API key not configured.\nSet ELEVENLABS_API_KEY or add to user/config.json');
+        return;
+      }
+      setProvider(chatId, 'elevenlabs');
+      // Switch to a good default ElevenLabs voice
+      const mode = getVoiceMode(chatId);
+      if (mode && !getElevenLabsPresets().find(v => v.key === mode.voice)) {
+        setVoice(chatId, 'josh');
+      }
+      await bot.sendMessage(chatId, '🔷 Switched to ElevenLabs — premium voice quality.\nUse /voice voices to see available voices.');
+    } else if (engineName === 'edge' || engineName === 'free') {
+      setProvider(chatId, 'edge');
+      await bot.sendMessage(chatId, '⚪ Switched to Edge TTS (free).\nUse /voice voices to see available voices.');
+    } else {
+      await bot.sendMessage(chatId, '⚠️ Unknown engine. Use: elevenlabs or edge');
+    }
+    return;
+  }
+
+  if (args.startsWith('model ')) {
+    const modelName = args.slice(6).trim();
+    const validModels = ['flash', 'quality', 'v3'];
+    if (validModels.includes(modelName)) {
+      setModel(chatId, modelName);
+      const desc = {
+        flash: 'Flash v2.5 — fast, low latency',
+        quality: 'Multilingual v2 — highest quality',
+        v3: 'V3 — newest, emotion tags support',
+      };
+      await bot.sendMessage(chatId, `🎙 Model: ${desc[modelName]}`);
+    } else {
+      await bot.sendMessage(chatId, `⚠️ Unknown model. Available: ${validModels.join(', ')}`);
+    }
     return;
   }
 
@@ -346,7 +421,18 @@ bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
     return;
   }
 
-  await bot.sendMessage(chatId, '🎙 Voice Commands:\n/voice on — enable voice mode\n/voice off — disable\n/voice status — check current state\n/voice set <voice> — change voice preset\n/voice voices — list available presets\n/voice textoff — voice only\n/voice texton — voice + text');
+  await bot.sendMessage(chatId,
+    '🎙 Voice Commands:\n' +
+    '/voice on — enable voice mode\n' +
+    '/voice off — disable\n' +
+    '/voice status — current state & engine\n' +
+    '/voice set <voice> — change voice preset\n' +
+    '/voice voices — list available presets\n' +
+    '/voice engine <elevenlabs|edge> — switch TTS engine\n' +
+    '/voice model <flash|quality|v3> — ElevenLabs model\n' +
+    '/voice textoff — voice only\n' +
+    '/voice texton — voice + text'
+  );
 });
 
 // ── Incoming Messages ────────────────────────────────────────────────────────
