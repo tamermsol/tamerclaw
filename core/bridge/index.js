@@ -27,6 +27,7 @@ import { enqueue, getPending, markAttempt } from './delivery-queue.js';
 import { auditEvent } from './audit-log.js';
 import { readConfigCached, writeFileAtomic, readJSONSafe, ensureDir, appendFile } from '../shared/async-fs.js';
 import { createTrace, tracedLogger, newTraceId } from '../shared/trace.js';
+import { getProxyMode, setProxyMode, resolveProxyModel, getProxiedAgents } from '../shared/proxy.js';
 import os from 'os';
 import paths from '../shared/paths.js';
 
@@ -195,8 +196,18 @@ async function loadSessionAsync(agentId, chatId) {
  *   - "deepseek-chat"             → provider "deepseek" (inferred)
  *   - "deepseek/deepseek-coder"   → explicit provider/model
  */
-function resolveModelConfig(agentId, config) {
-  const rawModel = config.agents[agentId]?.model || config.defaults?.model || 'claude-sonnet-4-6';
+function resolveModelConfig(agentId, config, messageText) {
+  const agent = config.agents[agentId] || {};
+  let rawModel = agent.model || config.defaults?.model || 'claude-sonnet-4-6';
+
+  // Dynamic model routing: pick model based on message complexity
+  if (rawModel === 'dynamic' && agent.modelRouting) {
+    const routing = agent.modelRouting;
+    const msg = (messageText || '').toLowerCase();
+    const patterns = routing.complexPatterns || [];
+    const isComplex = patterns.some(p => msg.includes(p)) || msg.length > 500;
+    rawModel = isComplex ? routing.complex : (routing.default || routing.simple);
+  }
 
   let provider = null;
   let modelId = rawModel;
@@ -234,10 +245,9 @@ function resolveModelConfig(agentId, config) {
 }
 
 // Legacy shim — returns raw model ID string
-function resolveModel(agentId, config) {
-  const agent = config.agents[agentId];
-  if (agent?.model) return agent.model;
-  return config.defaults?.model || 'claude-sonnet-4-6';
+function resolveModel(agentId, config, messageText) {
+  const mc = resolveModelConfig(agentId, config, messageText);
+  return mc.modelId;
 }
 
 // ── System Prompt Builder ──────────────────────────────────────────────────
@@ -354,7 +364,7 @@ async function callClaude(agentId, chatId, message, mediaPath = null, traceId = 
   const trace = createTrace('bridge', 'callClaude', traceId);
   const log = tracedLogger(trace);
   const config = await loadConfigAsync();
-  const mc = resolveModelConfig(agentId, config);
+  const mc = resolveModelConfig(agentId, config, message);
 
   // Route to OpenAI-compatible provider (DeepSeek, Ollama, etc.)
   if (mc.api === 'openai-compatible') {
@@ -466,8 +476,15 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
  */
 async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = null, trace = null) {
   const sessionKey = getSessionKey(agentId, chatId);
-  const modelFlag = mc.cliFlag || 'sonnet';
+  let modelFlag = mc.cliFlag || 'sonnet';
   const log = tracedLogger(trace || createTrace('bridge', 'claude-cli'));
+
+  // Check proxy mode — dynamic routing overrides the model
+  const proxyResult = resolveProxyModel(agentId, modelFlag, message);
+  if (proxyResult.proxied) {
+    modelFlag = proxyResult.model;
+    log.log(`Proxy mode 2: ${proxyResult.complexity} → ${modelFlag}`);
+  }
 
   // Build system prompt and write to temp file (avoids arg length issues)
   const systemPrompt = await buildSystemPromptAsync(agentId);
@@ -748,6 +765,13 @@ async function downloadMedia(bot, fileId, agentId) {
 
 // ── Bot Initialization ─────────────────────────────────────────────────────
 function startBot(agentId, agentConfig, config) {
+  // Skip agents that have standalone bot services (they poll their own token)
+  const standaloneAgents = config.standaloneAgents || [];
+  if (standaloneAgents.includes(agentId)) {
+    console.log(`[${agentId}] Standalone service — skipping (has own systemd service)`);
+    return null;
+  }
+
   // Use agent-specific token, or shared token for testing
   const token = agentConfig.botToken || config.telegram?.sharedBotToken;
 
@@ -848,9 +872,57 @@ function startBot(agentId, agentConfig, config) {
         const uptime = Math.floor(process.uptime());
         const botCount = bots.size;
         const sessionCount = sessions.size;
+        const proxyMode = getProxyMode(targetAgent);
+        const proxyInfo = proxyMode === 2 ? 'Dynamic (haiku/opus)' : 'Original';
         await bot.sendMessage(msg.chat.id,
-          `System status:\nUptime: ${uptime}s\nActive bots: ${botCount}\nSessions: ${sessionCount}`
+          `Agent: *${targetAgent}*\nProxy: ${proxyInfo}\nUptime: ${uptime}s\nActive bots: ${botCount}\nSessions: ${sessionCount}`,
+          { parse_mode: 'Markdown' }
         );
+        return;
+      }
+
+      // /proxy command — switch between original model and dynamic routing
+      if (msg.text.startsWith('/proxy')) {
+        const arg = msg.text.split(/\s+/)[1];
+        if (arg === '1') {
+          setProxyMode(targetAgent, 1);
+          const config2 = loadConfig();
+          const origModel = config2.agents[targetAgent]?.model || config2.defaults?.model || 'sonnet';
+          await bot.sendMessage(msg.chat.id,
+            `*${targetAgent}* → original model (${origModel})\n\nRate limit: agent's own config.`,
+            { parse_mode: 'Markdown' }
+          );
+        } else if (arg === '2') {
+          setProxyMode(targetAgent, 2);
+          await bot.sendMessage(msg.chat.id,
+            `*${targetAgent}* → dynamic routing active\n\n- Simple messages → haiku (saves rate limit)\n- Complex messages → opus\n\nUse /proxy 1 to switch back.`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          const mode = getProxyMode(targetAgent);
+          const proxied = getProxiedAgents();
+          let statusMsg = `*${targetAgent}* proxy mode: ${mode === 2 ? 'Dynamic (mode 2)' : 'Original (mode 1)'}`;
+          if (proxied.length > 0) {
+            statusMsg += `\n\nAgents on dynamic routing: ${proxied.join(', ')}`;
+          }
+          statusMsg += `\n\nCommands:\n- /proxy 1 — original model\n- /proxy 2 — dynamic (haiku/opus)`;
+          await bot.sendMessage(msg.chat.id, statusMsg, { parse_mode: 'Markdown' });
+        }
+        return;
+      }
+
+      // /stop command — kill active Claude CLI process for this chat
+      if (msg.text === '/stop') {
+        const sessionKey = getSessionKey(targetAgent, msg.chat.id);
+        const proc = activeCalls.get(sessionKey);
+        if (proc) {
+          proc.kill('SIGTERM');
+          setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+          activeCalls.delete(sessionKey);
+          await bot.sendMessage(msg.chat.id, `Stopped *${targetAgent}*.`, { parse_mode: 'Markdown' });
+        } else {
+          await bot.sendMessage(msg.chat.id, `No active task for *${targetAgent}*.`, { parse_mode: 'Markdown' });
+        }
         return;
       }
     }

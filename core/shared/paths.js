@@ -28,6 +28,8 @@ export const paths = {
   logs: path.join(TAMERCLAW_HOME, 'user', 'logs'),
   auditLog: path.join(TAMERCLAW_HOME, 'user', 'logs', 'config-audit.jsonl'),
   deliveryQueue: path.join(TAMERCLAW_HOME, 'user', 'delivery-queue'),
+  proxyState: path.join(TAMERCLAW_HOME, 'core', 'relay', 'proxy-state.json'),
+  rateUsage: path.join(TAMERCLAW_HOME, 'core', 'shared', 'rate-usage.json'),
   sessions: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId, 'sessions'),
   memory: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId, 'memory'),
   agentDir: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId),

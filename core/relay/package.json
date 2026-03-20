@@ -1,0 +1,9 @@
+{
+  "name": "tamerclaw-relay",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "TamerClaw Telegram relay bot and inbox watcher",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

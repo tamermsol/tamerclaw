@@ -352,6 +352,7 @@ function callClaude(message, chatId, mediaPath = null) {
     let sentMessages = [];         // All sent message IDs (for multi-message responses)
     let lastTextBlockEnd = 0;      // Track end of last text block to add separators
     let inToolPhase = false;       // True when we're between text blocks (doing tool calls)
+    let streamSendInFlight = null; // Track pending doStreamUpdate promise to prevent race condition
 
     // ── Tool activity tracking ──
     let lastActivity = '';
@@ -454,12 +455,12 @@ function callClaude(message, chatId, mediaPath = null) {
                     (timeSince >= 1500 && newChars > 0) ? 0 : Math.max(0, 1500 - timeSince);
 
       if (delay === 0) {
-        doStreamUpdate();
+        streamSendInFlight = doStreamUpdate();
       } else {
         streamUpdatePending = true;
         setTimeout(() => {
           streamUpdatePending = false;
-          doStreamUpdate();
+          streamSendInFlight = doStreamUpdate();
         }, delay);
       }
     }
@@ -606,12 +607,12 @@ function callClaude(message, chatId, mediaPath = null) {
       }
     }, 10000);
 
-    // 15 min timeout
+    // 30 min timeout
     const timeoutTimer = setTimeout(() => {
-      console.error('[supreme] Timeout after 900s — killing');
+      console.error('[supreme] Timeout after 1800s — killing');
       proc.kill('SIGTERM');
       setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
-    }, 900000);
+    }, 1800000);
 
     proc.stdout.on('data', (data) => { processChunk(data.toString()); });
     proc.stderr.on('data', (data) => { stderr += data.toString(); });
@@ -629,6 +630,13 @@ function callClaude(message, chatId, mediaPath = null) {
           parsedEvents.push(event);
           processStreamEvent(event);
         } catch {}
+      }
+
+      // Wait for any in-flight stream send to complete before checking streamedAnyText
+      // This prevents the race condition where fast responses cause double messages
+      if (streamSendInFlight) {
+        try { await streamSendInFlight; } catch {}
+        await new Promise(r => setTimeout(r, 100));
       }
 
       if (stopRequested) {
