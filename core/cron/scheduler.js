@@ -8,6 +8,7 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 import paths from '../shared/paths.js';
 
 const JOBS_PATH = paths.cronJobs;
@@ -127,6 +128,56 @@ export function getDueJobs() {
   }
 
   return due;
+}
+
+// List system crontab entries as read-only jobs for the dashboard
+export function listSystemCronJobs() {
+  try {
+    const raw = execSync('crontab -l 2>/dev/null', { encoding: 'utf8' });
+    const lines = raw.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+    return lines.map((line, i) => {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 6) return null;
+      const cron = parts.slice(0, 5).join(' ');
+      const command = parts.slice(5).join(' ');
+      // Try to detect agent from command path
+      let agentId = 'system';
+      if (command.includes('workspace-trading') || command.includes('trading')) agentId = 'trading';
+      if (command.includes('heartbeat')) agentId = 'system';
+      return {
+        id: `sys-cron-${i}`,
+        name: inferCronJobName(command),
+        agentId,
+        enabled: true,
+        system: true,
+        source: 'system',
+        schedule: { kind: 'recurring', cron },
+        command: command,
+        state: { lastRunAtMs: 0, lastRunStatus: null, lastError: null, consecutiveErrors: 0 },
+        createdAt: null,
+      };
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function inferCronJobName(command) {
+  if (command.includes('heartbeat')) return 'Heartbeat Monitor';
+  if (command.includes('log_rotate')) return 'Log Rotation';
+  if (command.includes('hourly_snapshot')) return 'Hourly Snapshot & Report';
+  if (command.includes('watchdog')) return 'Trading Watchdog';
+  if (command.includes('send_snapshot')) return 'Snapshot Report';
+  // Extract script name as fallback
+  const match = command.match(/(\w+\.(?:py|sh|js))/);
+  return match ? match[1] : command.slice(0, 40);
+}
+
+// Get all jobs — both managed and system crontab
+export function listAllJobs(agentId = null) {
+  const managed = listJobs(agentId);
+  const system = listSystemCronJobs().filter(j => !agentId || j.agentId === agentId);
+  return [...managed, ...system];
 }
 
 // Record a job run

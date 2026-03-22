@@ -72,6 +72,9 @@ async function restoreSessionsFromDisk(config) {
             const data = JSON.parse(await fsp.readFile(path.join(sessionDir, file), 'utf-8'));
             sessions.set(key, data);
             restored++;
+            // Populate agentChatIds so session counts are accurate after restore
+            if (!agentChatIds.has(agentId)) agentChatIds.set(agentId, new Set());
+            agentChatIds.get(agentId).add(chatId);
           }
         } catch {}
       }
@@ -1058,7 +1061,82 @@ const bridgeInterface = {
       statuses[id] = { active: true, sessions: agentChatIds.get(id)?.size || 0 };
     }
     return statuses;
-  }
+  },
+  getAgentSessions: (agentId) => {
+    const result = [];
+    const chatIds = agentChatIds.get(agentId) || new Set();
+    for (const chatId of chatIds) {
+      const key = getSessionKey(agentId, chatId);
+      const sess = sessions.get(key);
+      if (sess) {
+        const history = sess.history || [];
+        const lastMsg = history.length > 0 ? history[history.length - 1] : null;
+        const firstMsg = history.length > 0 ? history[0] : null;
+        result.push({
+          chatId: String(chatId),
+          messageCount: history.length,
+          lastActivity: sess.lastActivity || null,
+          startedAt: firstMsg?.timestamp || sess.lastActivity || null,
+          summary: lastMsg ? (lastMsg.content || lastMsg.text || '').substring(0, 120) : '',
+          preview: firstMsg ? (firstMsg.content || firstMsg.text || '').substring(0, 80) : '',
+        });
+      }
+    }
+    // Also check disk sessions not in memory
+    try {
+      const sessionDir = getSessionDir(agentId);
+      if (fs.existsSync(sessionDir)) {
+        const files = fs.readdirSync(sessionDir);
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue;
+          const chatId = path.basename(file, '.json');
+          if (chatIds.has(chatId) || chatIds.has(Number(chatId))) continue;
+          try {
+            const data = JSON.parse(fs.readFileSync(path.join(sessionDir, file), 'utf-8'));
+            const history = data.history || [];
+            const lastMsg = history.length > 0 ? history[history.length - 1] : null;
+            const firstMsg = history.length > 0 ? history[0] : null;
+            result.push({
+              chatId: String(chatId),
+              messageCount: history.length,
+              lastActivity: data.lastActivity || null,
+              startedAt: firstMsg?.timestamp || data.lastActivity || null,
+              summary: lastMsg ? (lastMsg.content || lastMsg.text || '').substring(0, 120) : '',
+              preview: firstMsg ? (firstMsg.content || firstMsg.text || '').substring(0, 80) : '',
+            });
+          } catch {}
+        }
+      }
+    } catch {}
+    // Sort by lastActivity descending
+    result.sort((a, b) => {
+      const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const tb = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return tb - ta;
+    });
+    return result;
+  },
+  getSessionHistory: (agentId, chatId) => {
+    const key = getSessionKey(agentId, chatId);
+    let sess = sessions.get(key);
+    if (!sess) {
+      // Try loading from disk
+      sess = loadSession(agentId, chatId);
+    }
+    if (!sess) return null;
+    const history = (sess.history || []).map(msg => ({
+      role: msg.role || (msg.isUser ? 'user' : 'assistant'),
+      content: msg.content || msg.text || '',
+      timestamp: msg.timestamp || null,
+    }));
+    return {
+      chatId: String(chatId),
+      agentId,
+      messageCount: history.length,
+      lastActivity: sess.lastActivity || null,
+      messages: history,
+    };
+  },
 };
 
 // ── Main ───────────────────────────────────────────────────────────────────

@@ -5,9 +5,10 @@
  */
 
 import http from 'http';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { addJob, removeJob, listJobs, updateJob } from '../cron/scheduler.js';
+import { addJob, removeJob, listJobs, listAllJobs, updateJob } from '../cron/scheduler.js';
 import { readConfigCached } from '../shared/async-fs.js';
 import paths from '../shared/paths.js';
 
@@ -39,13 +40,73 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+// ── Auth helpers ──
+
+const AUTH_FILE = path.join(paths.user, 'auth.json');
+const sessions = new Map(); // token -> { username, createdAt }
+
+function loadAuthUsers() {
+  try {
+    if (fs.existsSync(AUTH_FILE)) {
+      return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    }
+  } catch {}
+  return { users: [] };
+}
+
+function saveAuthUsers(data) {
+  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
+}
+
+function hashPassword(password, salt) {
+  if (!salt) salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return { hash, salt };
+}
+
+function verifyPassword(password, storedHash, salt) {
+  const { hash } = hashPassword(password, salt);
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(storedHash));
+}
+
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function ensureDefaultAdmin(config) {
+  const auth = loadAuthUsers();
+  if (auth.users.length === 0) {
+    // Create default admin from gateway token or generate one
+    const defaultPass = config.gateway?.auth?.token || crypto.randomBytes(8).toString('hex');
+    const { hash, salt } = hashPassword(defaultPass);
+    auth.users.push({
+      username: 'admin',
+      passwordHash: hash,
+      salt,
+      role: 'admin',
+      createdAt: new Date().toISOString(),
+    });
+    saveAuthUsers(auth);
+    console.log(`[gateway] Created default admin user (password: ${defaultPass})`);
+  }
+  return auth;
+}
+
 function authenticate(req, config) {
   const gw = config.gateway;
-  if (!gw?.auth?.token) return true;
   const auth = req.headers.authorization;
-  if (!auth) return false;
+  if (!auth) {
+    // No auth header — check if auth is optional (no token & no users)
+    if (!gw?.auth?.token) return true;
+    return false;
+  }
   const token = auth.replace('Bearer ', '');
-  return token === gw.auth.token;
+  // Check session tokens first
+  if (sessions.has(token)) return true;
+  // Fall back to legacy static token
+  if (gw?.auth?.token && token === gw.auth.token) return true;
+  return false;
 }
 
 function isDenied(command, config) {
@@ -55,10 +116,6 @@ function isDenied(command, config) {
 
 async function handleRequest(req, res) {
   const config = await loadConfig();
-
-  if (!authenticate(req, config)) {
-    return json(res, 401, { error: 'Unauthorized' });
-  }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const method = req.method;
@@ -71,16 +128,116 @@ async function handleRequest(req, res) {
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   try {
+    // ── Auth (public — no token required) ──
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      const body = await parseBody(req);
+      if (!body.username || !body.password) {
+        return json(res, 400, { error: 'username and password required' });
+      }
+
+      const authData = loadAuthUsers();
+      const user = authData.users.find(u => u.username === body.username);
+      if (!user) {
+        return json(res, 401, { error: 'Invalid username or password' });
+      }
+
+      try {
+        if (!verifyPassword(body.password, user.passwordHash, user.salt)) {
+          return json(res, 401, { error: 'Invalid username or password' });
+        }
+      } catch {
+        return json(res, 401, { error: 'Invalid username or password' });
+      }
+
+      const sessionToken = generateSessionToken();
+      sessions.set(sessionToken, {
+        username: user.username,
+        role: user.role || 'admin',
+        createdAt: Date.now(),
+      });
+
+      return json(res, 200, {
+        token: sessionToken,
+        username: user.username,
+        role: user.role || 'admin',
+      });
+    }
+
+    // ── Register user (admin only) ──
+    if (pathname === '/api/auth/register' && method === 'POST') {
+      if (!authenticate(req, config)) {
+        return json(res, 401, { error: 'Unauthorized' });
+      }
+      const body = await parseBody(req);
+      if (!body.username || !body.password) {
+        return json(res, 400, { error: 'username and password required' });
+      }
+
+      const authData = loadAuthUsers();
+      if (authData.users.find(u => u.username === body.username)) {
+        return json(res, 409, { error: 'Username already exists' });
+      }
+
+      const { hash, salt } = hashPassword(body.password);
+      authData.users.push({
+        username: body.username,
+        passwordHash: hash,
+        salt,
+        role: body.role || 'user',
+        createdAt: new Date().toISOString(),
+      });
+      saveAuthUsers(authData);
+
+      return json(res, 201, { ok: true, username: body.username });
+    }
+
+    // ── Auth check ──
+    if (!authenticate(req, config)) {
+      return json(res, 401, { error: 'Unauthorized' });
+    }
+
     // ── Agents ──
     if (pathname === '/api/agents' && method === 'GET') {
+      const botStatuses = bridgeRef?.getBotStatuses?.() || {};
       const agents = Object.entries(config.agents).map(([id, a]) => ({
         id,
         telegramAccount: a.telegramAccount,
         hasToken: !!a.botToken,
         model: a.model || config.defaults.model,
-        workspace: a.workspace
+        workspace: a.workspace,
+        isActive: !!botStatuses[id]?.active,
+        sessions: botStatuses[id]?.sessions || 0,
       }));
       return json(res, 200, { agents });
+    }
+
+    // ── Agent sessions list ──
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/sessions$/) && method === 'GET') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+
+      const sessionsList = [];
+      if (bridgeRef?.getAgentSessions) {
+        const agentSessions = bridgeRef.getAgentSessions(agentId);
+        for (const sess of agentSessions) {
+          sessionsList.push(sess);
+        }
+      }
+      return json(res, 200, { sessions: sessionsList });
+    }
+
+    // ── Session history (for continuation) ──
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/sessions\/[\w-]+$/) && method === 'GET') {
+      const parts = pathname.split('/');
+      const agentId = parts[3];
+      const chatId = parts[5];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+
+      if (bridgeRef?.getSessionHistory) {
+        const history = bridgeRef.getSessionHistory(agentId, chatId);
+        if (history) return json(res, 200, history);
+      }
+      return json(res, 404, { error: 'Session not found' });
     }
 
     // ── Send message to agent ──
@@ -118,7 +275,9 @@ async function handleRequest(req, res) {
     // ── Cron jobs ──
     if (pathname === '/api/cron/jobs' && method === 'GET') {
       const agentId = url.searchParams.get('agentId');
-      return json(res, 200, { jobs: listJobs(agentId) });
+      const includeSystem = url.searchParams.get('system') !== 'false';
+      const jobs = includeSystem ? listAllJobs(agentId) : listJobs(agentId);
+      return json(res, 200, { jobs });
     }
 
     if (pathname === '/api/cron/jobs' && method === 'POST') {
@@ -185,10 +344,22 @@ async function handleRequest(req, res) {
 
     // ── Status ──
     if (pathname === '/api/status' && method === 'GET') {
+      const botStatuses = bridgeRef?.getBotStatuses?.() || {};
+      const totalAgents = Object.keys(config.agents).length;
+      const activeAgents = Object.keys(botStatuses).length;
+      let totalSessions = 0;
+      for (const bot of Object.values(botStatuses)) {
+        totalSessions += bot.sessions || 0;
+      }
       return json(res, 200, {
         system: config.system,
-        bots: bridgeRef?.getBotStatuses?.() || {},
-        cron: { jobs: listJobs().length },
+        bots: {
+          statuses: botStatuses,
+          active: activeAgents,
+          total: totalAgents,
+          sessions: totalSessions,
+        },
+        cron: { jobs: listAllJobs().length, jobCount: listAllJobs().length },
         delivery: { pending: bridgeRef?.getDeliveryQueue?.()?.length || 0 }
       });
     }
@@ -206,6 +377,9 @@ export function startGateway(config) {
     console.log('[gateway] Disabled in config');
     return null;
   }
+
+  // Ensure default admin user exists
+  ensureDefaultAdmin(config);
 
   const port = gw.port || 19789;
   const host = gw.bind === 'loopback' ? '127.0.0.1' : '0.0.0.0';
