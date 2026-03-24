@@ -511,6 +511,18 @@ function extractResultText(events) {
   return texts.join('\n') || null;
 }
 
+/**
+ * Extract stop_reason from stream-json events.
+ * Returns 'max_turns' when the agent hit the turn limit.
+ */
+function extractStopReason(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type === 'result' && ev.stop_reason) return ev.stop_reason;
+  }
+  return null;
+}
+
 // ── Stream Outbox ─────────────────────────────────────────────────────────────
 
 /**
@@ -958,6 +970,141 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
       // Fallback: if stream-json parsing failed, treat raw stdout as text
       if (!response && rawStdout.trim()) {
         response = rawStdout.trim();
+      }
+
+      // ── Auto-continue on max_turns ──
+      const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
+      if (code === 0 && stopReason === 'max_turns') {
+        const sessionId = existingSessionId || agentSessions[agentId]?.sessionId;
+        if (sessionId) {
+          console.log(`[${agentId}] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
+          if (chatId) {
+            sendReply(chatId, `*${agentId}* hit turn limit — auto-continuing...`);
+          }
+          // Resume the same session with a "continue" prompt
+          const continueArgs = [
+            '-p', 'Continue where you left off. Complete the task.',
+            '--verbose',
+            '--output-format', 'stream-json',
+            '--max-turns', '200',
+            '--model', model,
+            '--allowedTools', tools,
+            '--resume', sessionId,
+            '--append-system-prompt', systemPrompt
+          ];
+          if (fallbackModel && fallbackModel !== model) {
+            continueArgs.push('--fallback-model', fallbackModel);
+          }
+
+          const contProc = spawn(CLAUDE_BIN, continueArgs, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+          activeProcess = contProc;
+
+          let contRaw = '';
+          let contErr = '';
+          const contEvents = [];
+          let contLineBuffer = '';
+          let contStreamText = streamText || ''; // carry over existing streamed text
+          let contLastStreamUpdate = 0;
+          let contLastStreamedLength = contStreamText.length;
+          let contStreamedAny = streamedAnyText;
+          const contStreamId = streamingEnabled ? `${Date.now()}-cont-${Math.random().toString(36).slice(2, 8)}` : null;
+          const contStartTime = Date.now();
+          let contLastProgressSent = 0;
+          let contToolCount = toolCount;
+
+          const contProgressTimer = setInterval(() => {
+            if (stopRequested) return;
+            if (streamingEnabled && contStreamedAny) return;
+            const now = Date.now();
+            const elapsed = Math.floor((now - contStartTime) / 1000);
+            if (elapsed < 30 || now - contLastProgressSent < 20000) return;
+            contLastProgressSent = now;
+            const mins = Math.floor(elapsed / 60);
+            if (chatId) sendReply(chatId, `*${agentId}* still working (${mins}m+, continued)\n\nSend /stop to cancel.`);
+          }, FALLBACK_PROGRESS_MS);
+
+          const contTimeoutTimer = setTimeout(() => {
+            console.error(`[${agentId}] Continuation timeout after 1200s — killing`);
+            contProc.kill('SIGTERM');
+            setTimeout(() => { try { contProc.kill('SIGKILL'); } catch {} }, 5000);
+          }, 1200000);
+
+          contProc.stdout.on('data', (d) => {
+            const chunk = d.toString();
+            contRaw += chunk;
+            contLineBuffer += chunk;
+            const lines = contLineBuffer.split('\n');
+            contLineBuffer = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const event = JSON.parse(line);
+                contEvents.push(event);
+                if (streamingEnabled && event.type === 'assistant' && event.message?.content) {
+                  for (const block of event.message.content) {
+                    if (block.type === 'text' && block.text) contStreamText += block.text;
+                    if (block.type === 'tool_use') contToolCount++;
+                  }
+                }
+                if (streamingEnabled && event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta?.text) {
+                  contStreamText += event.delta.text;
+                }
+                if (streamingEnabled && contStreamText) {
+                  const now = Date.now();
+                  const newChars = contStreamText.length - contLastStreamedLength;
+                  if ((newChars >= 80 && now - contLastStreamUpdate >= 4000) || (newChars > 0 && now - contLastStreamUpdate >= 4000)) {
+                    updateStreamMessage(chatId, contStreamId, contStreamText, false);
+                    contLastStreamUpdate = now;
+                    contLastStreamedLength = contStreamText.length;
+                    contStreamedAny = true;
+                  }
+                }
+              } catch {}
+            }
+          });
+          contProc.stderr.on('data', (d) => { contErr += d.toString(); });
+
+          contProc.on('close', (rc) => {
+            clearInterval(contProgressTimer);
+            clearTimeout(contTimeoutTimer);
+            activeProcess = null;
+            sessionOwner.set(cwd, agentId);
+            saveSessionOwners(sessionOwner);
+
+            if (contLineBuffer.trim()) {
+              try { contEvents.push(JSON.parse(contLineBuffer)); } catch {}
+            }
+
+            let contResponse = extractResultText(contEvents);
+            if (!contResponse && contRaw.trim()) contResponse = contRaw.trim();
+
+            // Use continuation response if available, otherwise fall back to original
+            const finalResponse = contResponse || response;
+
+            if (rc === 0 && finalResponse) {
+              incrementSessionMessageCount(agentId);
+              console.log(`[${agentId}] Continuation completed: ${finalResponse.length} chars (${contToolCount} total tool ops)`);
+              appendDailyMemory(agentId, userMessage, finalResponse.length);
+
+              if (streamingEnabled && contStreamedAny) {
+                const cleanedCont = extractAndSendMedia(chatId, finalResponse, agentId);
+                updateStreamMessage(chatId, contStreamId, cleanedCont, true);
+                resolve({ text: finalResponse, streamed: true });
+              } else {
+                resolve({ text: finalResponse, streamed: false });
+              }
+            } else {
+              console.error(`[${agentId}] Continuation failed (code ${rc}): ${contErr.slice(0, 200)}`);
+              // Return original response from before the continuation
+              if (response) {
+                resolve({ text: response, streamed: streamedAnyText });
+              } else {
+                resolve({ text: `[${agentId} hit turn limit and continuation failed. Error: ${contErr.slice(0, 100)}]`, streamed: false });
+              }
+            }
+          });
+          return; // Don't fall through to normal result handling
+        }
       }
 
       if (code === 0 && response) {

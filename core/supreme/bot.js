@@ -301,6 +301,18 @@ function extractResultFromEvents(events) {
   return null;
 }
 
+/**
+ * Extract stop_reason from stream-json events.
+ * Returns 'max_turns' when the agent hit the turn limit.
+ */
+function extractStopReason(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type === 'result' && ev.stop_reason) return ev.stop_reason;
+  }
+  return null;
+}
+
 // ── Claude CLI Execution (streaming with live Telegram updates) ───────────────
 
 function callClaude(message, chatId, mediaPath = null) {
@@ -659,6 +671,75 @@ function callClaude(message, chatId, mediaPath = null) {
       }
       if (!response && rawStdout.trim()) {
         response = rawStdout.trim();
+      }
+
+      // ── Auto-continue on max_turns ──
+      const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
+      if (code === 0 && stopReason === 'max_turns') {
+        console.log('[supreme] Hit max_turns — auto-continuing...');
+        if (chatId) {
+          bot.sendMessage(chatId, '👑 Supreme hit turn limit — auto-continuing...').catch(() => {});
+        }
+        // Resume with a continue prompt using the same session
+        const sessionId = parsedEvents.find(e => e.session_id)?.session_id || '';
+        if (!sessionId) {
+          console.error('[supreme] No session_id found in events — cannot auto-continue');
+          // Fall through to normal result handling
+        } else {
+          const contPromptFile = path.join(tmpDir, 'claude-supreme-cont-prompt.txt');
+          fs.writeFileSync(contPromptFile, 'Continue where you left off. Complete the task.');
+          const contCmd = `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT ${CLAUDE_BIN} -p "$(cat ${contPromptFile})" --verbose --output-format stream-json --max-turns 200 --model opus --allowedTools "${tools}" --resume ${sessionId} --append-system-prompt "$(cat ${sysFile})"`;
+          const contProc = spawn('bash', ['-c', contCmd], { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        activeProcess = contProc;
+
+        let contRaw = '';
+        let contErr = '';
+        const contEvents = [];
+        let contLineBuffer = '';
+
+        contProc.stdout.on('data', (d) => {
+          const chunk = d.toString();
+          contRaw += chunk;
+          contLineBuffer += chunk;
+          const lines = contLineBuffer.split('\n');
+          contLineBuffer = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try { contEvents.push(JSON.parse(line)); } catch {}
+          }
+        });
+        contProc.stderr.on('data', (d) => { contErr += d.toString(); });
+
+        contProc.on('close', async (rc) => {
+          activeProcess = null;
+          if (contLineBuffer.trim()) {
+            try { contEvents.push(JSON.parse(contLineBuffer)); } catch {}
+          }
+
+          let contResponse = extractResultFromEvents(contEvents);
+          if (!contResponse && contRaw.trim()) contResponse = contRaw.trim();
+
+          const finalResponse = contResponse || response;
+          if (rc === 0 && finalResponse) {
+            console.log(`[supreme] ✅ Continuation completed: ${finalResponse.length} chars`);
+            appendDailyMemory(userMessage, finalResponse.length);
+            if (progressMessageId) {
+              try { await bot.deleteMessage(chatId, progressMessageId); } catch {}
+            }
+            sendLongMessage(chatId, finalResponse);
+            resolve({ text: finalResponse, streamed: false });
+          } else {
+            console.error(`[supreme] Continuation failed (code ${rc}): ${contErr.slice(0, 200)}`);
+            if (response) {
+              sendLongMessage(chatId, response);
+              resolve({ text: response, streamed: false });
+            } else {
+              reject(new Error(`Supreme hit turn limit and continuation failed: ${contErr.slice(0, 200)}`));
+            }
+          }
+        });
+          return;
+        } // end else (sessionId found)
       }
 
       if (code === 0 && response) {

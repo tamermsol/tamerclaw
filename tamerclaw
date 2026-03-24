@@ -716,48 +716,75 @@ cmd_update() {
     stashed=1
   fi
 
-  # Pull latest
+  # Record pre-pull HEAD for diffing
+  local old_head
+  old_head=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "")
   local old_version="$VERSION"
-  git -C "$SCRIPT_DIR" pull --ff-only origin main 2>&1 || {
+
+  # Pull latest
+  local pull_output
+  pull_output=$(git -C "$SCRIPT_DIR" pull --ff-only origin main 2>&1) || {
     err "Pull failed. You may have diverged from upstream."
     echo "    Try: cd $SCRIPT_DIR && git pull --rebase origin main"
     [ "$stashed" -eq 1 ] && git -C "$SCRIPT_DIR" stash pop 2>/dev/null
     exit 1
   }
 
+  if echo "$pull_output" | grep -q "Already up to date"; then
+    info "Already up to date (v${VERSION})"
+    return
+  fi
+
   local new_version
   new_version=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/version.json','utf-8')).version)" 2>/dev/null || echo "unknown")
 
-  # Reinstall deps if package.json changed
-  if git -C "$SCRIPT_DIR" diff HEAD~1 --name-only 2>/dev/null | grep -q "package.json"; then
-    info "Dependencies changed. Reinstalling..."
-    (cd "$SCRIPT_DIR/core/bridge" && npm install --silent) || true
-    (cd "$SCRIPT_DIR/core/supreme" && npm install --silent) || true
+  # Show what changed
+  local commits_pulled
+  commits_pulled=$(git -C "$SCRIPT_DIR" log --oneline "${old_head}..HEAD" 2>/dev/null | wc -l | tr -d ' ')
+  info "Pulled $commits_pulled new commit(s)"
+
+  # Reinstall deps if package.json changed OR node_modules are missing
+  local need_deps=0
+  if [ -n "$old_head" ] && git -C "$SCRIPT_DIR" diff "${old_head}..HEAD" --name-only 2>/dev/null | grep -q "package.json"; then
+    need_deps=1
+  fi
+  # Also reinstall if node_modules are missing entirely
+  if [ ! -d "$SCRIPT_DIR/core/bridge/node_modules/node-telegram-bot-api" ] || \
+     [ ! -d "$SCRIPT_DIR/core/supreme/node_modules/node-telegram-bot-api" ]; then
+    need_deps=1
+  fi
+
+  if [ "$need_deps" -eq 1 ]; then
+    info "Installing/updating dependencies..."
+    (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
+    (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
   fi
 
   # Reload systemd if service files changed
   $SCTL daemon-reload 2>/dev/null || true
 
-  # Safe-restart services that were running
-  local restart_needed=0
-  if $SCTL is-active tamerclaw-bridge &>/dev/null; then
-    restart_needed=1
-  fi
-  if $SCTL is-active tamerclaw-supreme &>/dev/null; then
-    restart_needed=1
-  fi
+  # Safe-restart only services that exist AND were running
+  local services_restarted=0
+  for svc in tamerclaw-bridge tamerclaw-supreme; do
+    if $SCTL cat "$svc" &>/dev/null && $SCTL is-active "$svc" &>/dev/null; then
+      info "Restarting $svc..."
+      if safe_restart_service "$svc"; then
+        services_restarted=$((services_restarted + 1))
+      fi
+    fi
+  done
 
-  if [ "$restart_needed" -eq 1 ]; then
-    info "Safe-restarting running services..."
-    cmd_restart all
+  if [ "$services_restarted" -gt 0 ]; then
+    info "$services_restarted service(s) restarted"
   fi
 
   echo ""
-  if [ "$old_version" != "$new_version" ]; then
-    info "Updated: v${old_version} → v${new_version}"
-  else
-    info "Already up to date (v${VERSION})"
-  fi
+  info "Updated: v${old_version} → v${new_version}"
+  echo ""
+  echo "  Changes:"
+  git -C "$SCRIPT_DIR" log --oneline "${old_head}..HEAD" 2>/dev/null | head -10 | while read -r line; do
+    echo "    $line"
+  done
 }
 
 # ── Start/Stop/Restart ────────────────────────────────────────────────────────
