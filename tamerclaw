@@ -636,7 +636,7 @@ Type=simple
 ${svc_user_line}
 WorkingDirectory=$SCRIPT_DIR/core/supreme
 ExecStart=$(which node) bot.js
-ExecStartPre=/bin/bash -c 'pkill -f \"node.*tamerclaw.*supreme/bot.js\" 2>/dev/null || true; sleep 1'
+ExecStartPre=/bin/bash -c 'sleep 0.5'
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -779,18 +779,46 @@ cmd_start() {
       info "Supreme Agent started. Logs: journalctl -u tamerclaw-supreme -f"
       ;;
     all|"")
-      $SCTL start tamerclaw-bridge 2>/dev/null && info "Bridge started" || warn "Bridge failed to start"
-      $SCTL start tamerclaw-supreme 2>/dev/null && info "Supreme Agent started" || warn "Supreme failed to start"
+      if $SCTL start tamerclaw-bridge 2>/dev/null; then
+        info "Bridge started"
+      else
+        warn "Bridge failed to start"
+        echo "    Checking logs..."
+        $JCTL -u tamerclaw-bridge -n 15 --no-pager 2>/dev/null || true
+      fi
+      if $SCTL start tamerclaw-supreme 2>/dev/null; then
+        info "Supreme Agent started"
+      else
+        warn "Supreme failed to start"
+        echo "    Checking logs..."
+        $JCTL -u tamerclaw-supreme -n 15 --no-pager 2>/dev/null || true
+        echo ""
+        echo "    Try running manually to debug:"
+        echo "      cd $SCRIPT_DIR/core/supreme && TAMERCLAW_HOME=$SCRIPT_DIR node bot.js"
+      fi
       echo ""
       info "All services started. Logs: tamerclaw logs"
       ;;
     --foreground)
-      info "Starting bridge in foreground..."
-      cd "$SCRIPT_DIR/core/bridge" && TAMERCLAW_HOME="$SCRIPT_DIR" node index.js
+      local fg_target="${2:-bridge}"
+      case "$fg_target" in
+        bridge)
+          info "Starting bridge in foreground..."
+          cd "$SCRIPT_DIR/core/bridge" && TAMERCLAW_HOME="$SCRIPT_DIR" node index.js
+          ;;
+        supreme)
+          info "Starting supreme in foreground..."
+          cd "$SCRIPT_DIR/core/supreme" && TAMERCLAW_HOME="$SCRIPT_DIR" node bot.js
+          ;;
+        *)
+          err "Unknown foreground target: $fg_target"
+          echo "Usage: tamerclaw start --foreground [bridge|supreme]"
+          ;;
+      esac
       ;;
     *)
       err "Unknown target: $target"
-      echo "Usage: tamerclaw start [bridge|supreme|all|--foreground]"
+      echo "Usage: tamerclaw start [bridge|supreme|all|--foreground [bridge|supreme]]"
       ;;
   esac
 }
@@ -1188,14 +1216,128 @@ cmd_restrict() {
   info "Bot restricted to Telegram user ID: $user_id"
 }
 
+# ── Doctor (diagnostics) ──────────────────────────────────────────────────────
+cmd_doctor() {
+  banner
+  echo -e "${BOLD}TamerClaw Diagnostics${NC}"
+  echo ""
+
+  # Check Node.js
+  local node_path
+  node_path=$(which node 2>/dev/null || echo "")
+  if [ -n "$node_path" ]; then
+    local node_ver
+    node_ver=$(node --version 2>/dev/null || echo "unknown")
+    echo -e "  ${GREEN}✓${NC} Node.js: $node_ver ($node_path)"
+  else
+    echo -e "  ${RED}✗${NC} Node.js: NOT FOUND"
+  fi
+
+  # Check Claude CLI
+  local claude_path
+  claude_path=$(which claude 2>/dev/null || echo "")
+  if [ -n "$claude_path" ]; then
+    echo -e "  ${GREEN}✓${NC} Claude CLI: $claude_path"
+  else
+    echo -e "  ${RED}✗${NC} Claude CLI: NOT FOUND"
+  fi
+
+  # Check npm
+  local npm_path
+  npm_path=$(which npm 2>/dev/null || echo "")
+  if [ -n "$npm_path" ]; then
+    echo -e "  ${GREEN}✓${NC} npm: $(npm --version 2>/dev/null)"
+  else
+    echo -e "  ${RED}✗${NC} npm: NOT FOUND"
+  fi
+
+  echo ""
+
+  # Check config
+  if [ -f "$SCRIPT_DIR/user/config.json" ]; then
+    echo -e "  ${GREEN}✓${NC} Config: $SCRIPT_DIR/user/config.json"
+  else
+    echo -e "  ${RED}✗${NC} Config: NOT FOUND (run: tamerclaw init)"
+  fi
+
+  # Check dependencies
+  echo ""
+  echo -e "${BOLD}Dependencies:${NC}"
+  if [ -d "$SCRIPT_DIR/core/bridge/node_modules/node-telegram-bot-api" ]; then
+    echo -e "  ${GREEN}✓${NC} Bridge: node_modules installed"
+  else
+    echo -e "  ${RED}✗${NC} Bridge: node_modules MISSING (run: cd core/bridge && npm install)"
+  fi
+  if [ -d "$SCRIPT_DIR/core/supreme/node_modules/node-telegram-bot-api" ]; then
+    echo -e "  ${GREEN}✓${NC} Supreme: node_modules installed"
+  else
+    echo -e "  ${RED}✗${NC} Supreme: node_modules MISSING (run: cd core/supreme && npm install)"
+  fi
+
+  # Check systemd
+  echo ""
+  echo -e "${BOLD}Systemd ($SYSTEMD_MODE mode):${NC}"
+  for svc in tamerclaw-bridge tamerclaw-supreme; do
+    local svc_file="$SVC_DIR/${svc}.service"
+    if [ -f "$svc_file" ]; then
+      local status
+      status=$($SCTL is-active "$svc" 2>/dev/null || echo "inactive")
+      local failed=""
+      if [ "$status" = "failed" ]; then
+        failed=" — $(${SCTL} show "$svc" --property=Result --value 2>/dev/null || echo "unknown reason")"
+      fi
+      case "$status" in
+        active)   echo -e "  ${GREEN}●${NC} $svc: running" ;;
+        failed)   echo -e "  ${RED}●${NC} $svc: FAILED${failed}" ;;
+        *)        echo -e "  ${YELLOW}●${NC} $svc: $status" ;;
+      esac
+    else
+      echo -e "  ${RED}✗${NC} $svc: service file not found at $svc_file"
+    fi
+  done
+
+  # Show recent errors for failed services
+  echo ""
+  for svc in tamerclaw-bridge tamerclaw-supreme; do
+    local status
+    status=$($SCTL is-active "$svc" 2>/dev/null || echo "inactive")
+    if [ "$status" = "failed" ] || [ "$status" = "inactive" ]; then
+      echo -e "${BOLD}Recent logs for $svc:${NC}"
+      $JCTL -u "$svc" -n 20 --no-pager 2>/dev/null || echo "  (no logs available)"
+      echo ""
+    fi
+  done
+
+  # Check ExecStart path in service file
+  echo -e "${BOLD}Service file checks:${NC}"
+  for svc in tamerclaw-bridge tamerclaw-supreme; do
+    local svc_file="$SVC_DIR/${svc}.service"
+    if [ -f "$svc_file" ]; then
+      local exec_start
+      exec_start=$(grep "^ExecStart=" "$svc_file" 2>/dev/null | head -1)
+      if [ -n "$exec_start" ]; then
+        local node_bin
+        node_bin=$(echo "$exec_start" | sed 's/ExecStart=//' | awk '{print $1}')
+        if [ -x "$node_bin" ]; then
+          echo -e "  ${GREEN}✓${NC} $svc: node binary exists ($node_bin)"
+        else
+          echo -e "  ${RED}✗${NC} $svc: node binary NOT FOUND at $node_bin"
+          echo "    Fix: tamerclaw init (to regenerate service files)"
+        fi
+      fi
+    fi
+  done
+}
+
 # ── Main Dispatch ─────────────────────────────────────────────────────────────
 case "${1:-}" in
   init)       cmd_init ;;
   update)     cmd_update ;;
-  start)      cmd_start "${2:-}" ;;
+  start)      cmd_start "${2:-}" "${3:-}" ;;
   stop)       cmd_stop "${2:-}" ;;
   restart|safe-restart)    cmd_restart "${2:-}" ;;
   status)     cmd_status ;;
+  doctor)     cmd_doctor ;;
   logs)       cmd_logs "${2:-}" ;;
   set-token)  cmd_set_token "${2:-}" "${3:-}" ;;
   agents)     cmd_agents ;;
@@ -1218,10 +1360,11 @@ case "${1:-}" in
     echo "    update                 Pull latest updates and restart services"
     echo ""
     echo "  ${BOLD}Services:${NC}"
-    echo "    start [target]         Start services (bridge|supreme|all|--foreground)"
+    echo "    start [target]         Start services (bridge|supreme|all|--foreground [bridge|supreme])"
     echo "    stop [target]          Stop services"
     echo "    restart [target]       Safe restart with health checks (bridge|supreme|all)"
     echo "    status                 Show system status"
+    echo "    doctor                 Run diagnostics (check deps, services, config)"
     echo "    logs [target]          Tail logs (bridge|supreme|all)"
     echo ""
     echo "  ${BOLD}Agents:${NC}"
