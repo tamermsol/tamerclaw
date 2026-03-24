@@ -86,13 +86,22 @@ check_prereqs() {
   local missing=0
 
   if ! command -v node &>/dev/null; then
-    err "Node.js not found. Install Node.js 18+ first."
+    err "Node.js not found."
+    echo ""
+    echo "    Install Node.js 20 (Ubuntu/Debian):"
+    echo "      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
+    echo "      sudo apt-get install -y nodejs"
+    echo ""
+    echo "    Or via nvm (any OS):"
+    echo "      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash"
+    echo "      source ~/.bashrc && nvm install 20"
+    echo ""
     missing=1
   else
     local node_ver
     node_ver=$(node -v | sed 's/v//' | cut -d. -f1)
     if [ "$node_ver" -lt 18 ]; then
-      err "Node.js $node_ver found but 18+ required."
+      err "Node.js $node_ver found but 18+ required. Upgrade to Node.js 20+."
       missing=1
     fi
   fi
@@ -100,13 +109,12 @@ check_prereqs() {
   if ! command -v claude &>/dev/null; then
     err "Claude Code CLI not found."
     echo "    Install: npm install -g @anthropic-ai/claude-code"
-    echo "    Or: curl -fsSL https://claude.ai/install.sh | sh"
     missing=1
   fi
 
   if [ "$missing" -eq 1 ]; then
     echo ""
-    err "Missing prerequisites. Install them and try again."
+    err "Missing prerequisites. Install them and run './tamerclaw init' again."
     exit 1
   fi
 
@@ -535,8 +543,22 @@ SUPTOOLSEOF
 
   # ── Step 7: Install dependencies ──
   info "Installing dependencies..."
-  (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -1) || true
-  (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -1) || true
+  if ! (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3); then
+    warn "Bridge dependencies may not have installed correctly"
+  fi
+  if ! (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3); then
+    warn "Supreme dependencies may not have installed correctly"
+  fi
+
+  # Verify critical modules exist
+  if [ ! -d "$SCRIPT_DIR/core/bridge/node_modules/node-telegram-bot-api" ]; then
+    warn "Bridge: node-telegram-bot-api not found — trying again..."
+    (cd "$SCRIPT_DIR/core/bridge" && npm install 2>&1 | tail -5)
+  fi
+  if [ ! -d "$SCRIPT_DIR/core/supreme/node_modules/node-telegram-bot-api" ]; then
+    warn "Supreme: node-telegram-bot-api not found — trying again..."
+    (cd "$SCRIPT_DIR/core/supreme" && npm install 2>&1 | tail -5)
+  fi
 
   # ── Step 8: Create systemd services ──
   info "Setting up systemd services..."
@@ -909,7 +931,8 @@ safe_restart_service() {
   else
     # Service failed to come back up
     local status
-    status=$($SCTL is-active "$svc" 2>/dev/null || echo "unknown")
+    status=$($SCTL is-active "$svc" 2>/dev/null)
+    [ -z "$status" ] && status="unknown"
     err "$svc failed to start (status: $status)"
     echo ""
     echo "  Recent logs:"
