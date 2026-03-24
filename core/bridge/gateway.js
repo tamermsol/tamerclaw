@@ -456,7 +456,7 @@ async function handleRequest(req, res) {
       if (!filePath) return json(res, 400, { error: 'path parameter required' });
 
       // Security: only serve files from known agent directories
-      const allowedPrefixes = [paths.agents + '/', paths.user + '/', '/tmp/'];
+      const allowedPrefixes = [paths.agents + '/', paths.user + '/', paths.tmp + '/'];
       const isAllowed = allowedPrefixes.some(prefix => filePath.startsWith(prefix));
       if (!isAllowed) return json(res, 403, { error: 'Access denied' });
 

@@ -14,6 +14,34 @@ VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DI
 # Determines whether to use system-level (requires root/sudo) or user-level systemd.
 # Sets SCTL (systemctl command), SVC_DIR (service file directory), SVC_WANTED_BY.
 detect_systemd_mode() {
+  # First, check if we already persisted the mode from a previous init
+  local saved_mode_file="$SCRIPT_DIR/user/.systemd-mode"
+  if [ -f "$saved_mode_file" ]; then
+    local saved_mode
+    saved_mode=$(cat "$saved_mode_file" 2>/dev/null || echo "")
+    if [ "$saved_mode" = "system" ]; then
+      SYSTEMD_MODE="system"
+      if [ "$(id -u)" -eq 0 ]; then
+        SCTL="systemctl"
+      else
+        SCTL="sudo systemctl"
+      fi
+      JCTL="journalctl"
+      SVC_DIR="/etc/systemd/system"
+      SVC_WANTED_BY="multi-user.target"
+      return
+    elif [ "$saved_mode" = "user" ]; then
+      SYSTEMD_MODE="user"
+      SCTL="systemctl --user"
+      JCTL="journalctl --user"
+      SVC_DIR="$HOME/.config/systemd/user"
+      SVC_WANTED_BY="default.target"
+      mkdir -p "$SVC_DIR" 2>/dev/null || true
+      return
+    fi
+  fi
+
+  # No saved mode — auto-detect
   if [ "$(id -u)" -eq 0 ]; then
     # Running as root — use system-level directly
     SYSTEMD_MODE="system"
@@ -88,14 +116,16 @@ check_prereqs() {
   if ! command -v node &>/dev/null; then
     err "Node.js not found."
     echo ""
-    echo "    Install Node.js 20 (Ubuntu/Debian):"
-    echo "      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
-    echo "      sudo apt-get install -y nodejs"
-    echo ""
-    echo "    Or via nvm (any OS):"
+    echo "    Install Node.js via nvm (recommended, no sudo needed):"
     echo "      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash"
     echo "      source ~/.bashrc && nvm install 20"
     echo ""
+    if sudo -n true 2>/dev/null || [ "$(id -u)" -eq 0 ]; then
+      echo "    Or via apt (Ubuntu/Debian, requires root):"
+      echo "      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
+      echo "      sudo apt-get install -y nodejs"
+      echo ""
+    fi
     missing=1
   else
     local node_ver
@@ -109,6 +139,7 @@ check_prereqs() {
   if ! command -v claude &>/dev/null; then
     err "Claude Code CLI not found."
     echo "    Install: npm install -g @anthropic-ai/claude-code"
+    echo "    Or: curl -fsSL https://claude.ai/install.sh | sh"
     missing=1
   fi
 
@@ -636,7 +667,6 @@ Type=simple
 ${svc_user_line}
 WorkingDirectory=$SCRIPT_DIR/core/supreme
 ExecStart=$(which node) bot.js
-ExecStartPre=/bin/bash -c 'sleep 0.5'
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -652,6 +682,9 @@ WantedBy=$SVC_WANTED_BY"
 
   $SCTL daemon-reload 2>/dev/null || true
   $SCTL enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+
+  # Persist systemd mode so subsequent commands use the same mode
+  echo "$SYSTEMD_MODE" > "$SCRIPT_DIR/user/.systemd-mode"
 
   # For user-level systemd, enable lingering so services survive logout
   if [ "$SYSTEMD_MODE" = "user" ]; then
@@ -731,8 +764,19 @@ cmd_update() {
   }
 
   if echo "$pull_output" | grep -q "Already up to date"; then
-    info "Already up to date (v${VERSION})"
-    return
+    # Even if code is up to date, check if services need repair
+    local svc_ok=true
+    for svc in tamerclaw-bridge tamerclaw-supreme; do
+      if ! $SCTL cat "$svc" &>/dev/null; then
+        svc_ok=false
+        break
+      fi
+    done
+    if $svc_ok; then
+      info "Already up to date (v${VERSION})"
+      return
+    fi
+    warn "Code is up to date but services need repair — regenerating..."
   fi
 
   local new_version
@@ -743,24 +787,77 @@ cmd_update() {
   commits_pulled=$(git -C "$SCRIPT_DIR" log --oneline "${old_head}..HEAD" 2>/dev/null | wc -l | tr -d ' ')
   info "Pulled $commits_pulled new commit(s)"
 
-  # Reinstall deps if package.json changed OR node_modules are missing
-  local need_deps=0
-  if [ -n "$old_head" ] && git -C "$SCRIPT_DIR" diff "${old_head}..HEAD" --name-only 2>/dev/null | grep -q "package.json"; then
-    need_deps=1
-  fi
-  # Also reinstall if node_modules are missing entirely
-  if [ ! -d "$SCRIPT_DIR/core/bridge/node_modules/node-telegram-bot-api" ] || \
-     [ ! -d "$SCRIPT_DIR/core/supreme/node_modules/node-telegram-bot-api" ]; then
-    need_deps=1
+  # Always reinstall dependencies after update to avoid stale/corrupt node_modules
+  info "Installing/updating dependencies..."
+  (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
+  (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
+
+  # Regenerate systemd service files (paths/configs may have changed)
+  if [ -f "$SCRIPT_DIR/user/config.json" ]; then
+    info "Regenerating systemd service files..."
+
+    local claude_bin_dir
+    claude_bin_dir=$(dirname "$(get_claude_path)" 2>/dev/null || echo "")
+    local svc_path="$PATH"
+    if [ -n "$claude_bin_dir" ] && [[ ":$svc_path:" != *":$claude_bin_dir:"* ]]; then
+      svc_path="$claude_bin_dir:$svc_path"
+    fi
+    for p in "$HOME/.local/bin" "/usr/local/bin" "/usr/bin"; do
+      [[ ":$svc_path:" != *":$p:"* ]] && svc_path="$p:$svc_path"
+    done
+
+    local svc_user_line=""
+    if [ "$SYSTEMD_MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
+      svc_user_line="User=$(whoami)
+Group=$(id -gn)"
+    fi
+
+    write_service_file "tamerclaw-bridge.service" "[Unit]
+Description=TamerClaw Bridge (Telegram ↔ Claude Code)
+After=network.target
+
+[Service]
+Type=simple
+${svc_user_line}
+WorkingDirectory=$SCRIPT_DIR/core/bridge
+ExecStart=$(which node) index.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=TAMERCLAW_HOME=$SCRIPT_DIR
+Environment=HOME=$HOME
+Environment=PATH=$svc_path
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tamerclaw-bridge
+
+[Install]
+WantedBy=$SVC_WANTED_BY"
+
+    write_service_file "tamerclaw-supreme.service" "[Unit]
+Description=TamerClaw Supreme Agent
+After=network.target
+
+[Service]
+Type=simple
+${svc_user_line}
+WorkingDirectory=$SCRIPT_DIR/core/supreme
+ExecStart=$(which node) bot.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=TAMERCLAW_HOME=$SCRIPT_DIR
+Environment=HOME=$HOME
+Environment=PATH=$svc_path
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tamerclaw-supreme
+
+[Install]
+WantedBy=$SVC_WANTED_BY"
   fi
 
-  if [ "$need_deps" -eq 1 ]; then
-    info "Installing/updating dependencies..."
-    (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
-    (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
-  fi
-
-  # Reload systemd if service files changed
+  # Reload systemd after regenerating service files
   $SCTL daemon-reload 2>/dev/null || true
 
   # Safe-restart only services that exist AND were running
@@ -1368,6 +1465,97 @@ cmd_doctor() {
   done
 }
 
+# ── Repair Command ────────────────────────────────────────────────────────────
+cmd_repair() {
+  banner
+  info "Repairing TamerClaw installation..."
+
+  if [ ! -f "$SCRIPT_DIR/user/config.json" ]; then
+    err "TamerClaw not initialized. Run: tamerclaw init"
+    exit 1
+  fi
+
+  # Reinstall dependencies
+  info "Reinstalling dependencies..."
+  (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
+  (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
+
+  # Regenerate systemd service files
+  info "Regenerating systemd service files..."
+
+  local claude_bin_dir
+  claude_bin_dir=$(dirname "$(get_claude_path)" 2>/dev/null || echo "")
+  local svc_path="$PATH"
+  if [ -n "$claude_bin_dir" ] && [[ ":$svc_path:" != *":$claude_bin_dir:"* ]]; then
+    svc_path="$claude_bin_dir:$svc_path"
+  fi
+  for p in "$HOME/.local/bin" "/usr/local/bin" "/usr/bin"; do
+    [[ ":$svc_path:" != *":$p:"* ]] && svc_path="$p:$svc_path"
+  done
+
+  local svc_user_line=""
+  if [ "$SYSTEMD_MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
+    svc_user_line="User=$(whoami)
+Group=$(id -gn)"
+  fi
+
+  write_service_file "tamerclaw-bridge.service" "[Unit]
+Description=TamerClaw Bridge (Telegram ↔ Claude Code)
+After=network.target
+
+[Service]
+Type=simple
+${svc_user_line}
+WorkingDirectory=$SCRIPT_DIR/core/bridge
+ExecStart=$(which node) index.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=TAMERCLAW_HOME=$SCRIPT_DIR
+Environment=HOME=$HOME
+Environment=PATH=$svc_path
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tamerclaw-bridge
+
+[Install]
+WantedBy=$SVC_WANTED_BY"
+
+  write_service_file "tamerclaw-supreme.service" "[Unit]
+Description=TamerClaw Supreme Agent
+After=network.target
+
+[Service]
+Type=simple
+${svc_user_line}
+WorkingDirectory=$SCRIPT_DIR/core/supreme
+ExecStart=$(which node) bot.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=TAMERCLAW_HOME=$SCRIPT_DIR
+Environment=HOME=$HOME
+Environment=PATH=$svc_path
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tamerclaw-supreme
+
+[Install]
+WantedBy=$SVC_WANTED_BY"
+
+  # Persist systemd mode
+  echo "$SYSTEMD_MODE" > "$SCRIPT_DIR/user/.systemd-mode"
+
+  $SCTL daemon-reload 2>/dev/null || true
+  $SCTL enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+
+  if [ "$SYSTEMD_MODE" = "user" ]; then
+    loginctl enable-linger "$(whoami)" 2>/dev/null || true
+  fi
+
+  info "Repair complete! Run: tamerclaw restart all"
+}
+
 # ── Main Dispatch ─────────────────────────────────────────────────────────────
 case "${1:-}" in
   init)       cmd_init ;;
@@ -1377,6 +1565,7 @@ case "${1:-}" in
   restart|safe-restart)    cmd_restart "${2:-}" ;;
   status)     cmd_status ;;
   doctor)     cmd_doctor ;;
+  repair)     cmd_repair ;;
   logs)       cmd_logs "${2:-}" ;;
   set-token)  cmd_set_token "${2:-}" "${3:-}" ;;
   agents)     cmd_agents ;;
@@ -1397,6 +1586,7 @@ case "${1:-}" in
     echo "  ${BOLD}Setup:${NC}"
     echo "    init                   Initialize TamerClaw (interactive wizard)"
     echo "    update                 Pull latest updates and restart services"
+    echo "    repair                 Reinstall deps + regenerate service files"
     echo ""
     echo "  ${BOLD}Services:${NC}"
     echo "    start [target]         Start services (bridge|supreme|all|--foreground [bridge|supreme])"
