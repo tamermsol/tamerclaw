@@ -1052,9 +1052,23 @@ bot.on('message', async (msg) => {
       }
       callCount++;
     } catch (err) {
-      console.error('[supreme] ❌', err.message?.slice(0, 300));
-      errorCount++;
-      bot.sendMessage(chatId, `⚠️ Error: ${err.message?.slice(0, 200)}`).catch(() => {});
+      const errMsg = err.message || '';
+      // Filter out non-fatal CLI warnings (stdin, deprecation notices, etc.)
+      const nonFatalPatterns = [
+        /no stdin data received/i,
+        /redirect stdin explicitly/i,
+        /When using --print/i,
+        /--output-format/i,
+        /proceeding without it/i
+      ];
+      const isNonFatal = nonFatalPatterns.some(p => p.test(errMsg));
+      if (isNonFatal) {
+        console.log('[supreme] Suppressed non-fatal CLI warning:', errMsg.slice(0, 150));
+      } else {
+        console.error('[supreme] ❌', errMsg.slice(0, 300));
+        errorCount++;
+        bot.sendMessage(chatId, `⚠️ Error: ${errMsg.slice(0, 200)}`).catch(() => {});
+      }
     } finally {
       try { fs.unlinkSync(PROCESSING_FILE); } catch {}
       processing = false;

@@ -841,8 +841,21 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
         console.error(`[${agentId}] Session tracking error:`, sessErr.message);
       }
     } catch (err) {
-      console.error(`[${agentId}] Error:`, err.message);
-      await bot.sendMessage(chatId, `⚠️ Error: ${err.message.slice(0, 200)}`);
+      const errMsg = err.message || '';
+      const nonFatalPatterns = [
+        /no stdin data received/i,
+        /redirect stdin explicitly/i,
+        /When using --print/i,
+        /--output-format/i,
+        /proceeding without it/i
+      ];
+      const isNonFatal = nonFatalPatterns.some(p => p.test(errMsg));
+      if (isNonFatal) {
+        console.log(`[${agentId}] Suppressed non-fatal CLI warning:`, errMsg.slice(0, 150));
+      } else {
+        console.error(`[${agentId}] Error:`, errMsg);
+        await bot.sendMessage(chatId, `⚠️ Error: ${errMsg.slice(0, 200)}`);
+      }
     }
   }, debounceMs);
 }

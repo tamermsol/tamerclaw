@@ -1651,11 +1651,24 @@ async function tick() {
       sendReply(chatId, `*${currentAgent}* finished (${timeStr})`);
     }
   } catch (err) {
-    console.error(`[${currentAgent}] Error:`, err.message?.slice(0, 300));
-    errorCount++;
-    const elapsed = Math.floor((Date.now() - taskStartTime) / 1000);
-    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
-    sendReply(chatId, `*${currentAgent}* failed after ${timeStr}\n\n_${err.message?.slice(0, 100)}_\n\nSend your message again to retry.`);
+    const errMsg = err.message || '';
+    const nonFatalPatterns = [
+      /no stdin data received/i,
+      /redirect stdin explicitly/i,
+      /When using --print/i,
+      /--output-format/i,
+      /proceeding without it/i
+    ];
+    const isNonFatal = nonFatalPatterns.some(p => p.test(errMsg));
+    if (isNonFatal) {
+      console.log(`[${currentAgent}] Suppressed non-fatal CLI warning:`, errMsg.slice(0, 150));
+    } else {
+      console.error(`[${currentAgent}] Error:`, errMsg.slice(0, 300));
+      errorCount++;
+      const elapsed = Math.floor((Date.now() - taskStartTime) / 1000);
+      const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
+      sendReply(chatId, `*${currentAgent}* failed after ${timeStr}\n\n_${errMsg.slice(0, 100)}_\n\nSend your message again to retry.`);
+    }
   } finally {
     fsp.unlink(PROCESSING_FILE).catch(() => {});
     processing = false;
