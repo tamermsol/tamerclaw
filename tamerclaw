@@ -977,17 +977,29 @@ cmd_restart() {
   services=$(resolve_services "$target")
 
   local failed=0
+  local skipped=0
+  local restarted=0
   for svc in $services; do
     echo ""
     echo -e "${BOLD}── Restarting: $svc ──${NC}"
+    # Skip services that haven't been set up yet
+    if ! $SCTL cat "$svc" &>/dev/null; then
+      warn "Service '$svc' not found — skipping (run './tamerclaw init' to set up services)"
+      skipped=$((skipped + 1))
+      continue
+    fi
     if ! safe_restart_service "$svc"; then
       failed=$((failed + 1))
+    else
+      restarted=$((restarted + 1))
     fi
   done
 
   echo ""
-  if [ "$failed" -eq 0 ]; then
-    info "Safe restart complete — all services healthy"
+  if [ "$failed" -eq 0 ] && [ "$restarted" -gt 0 ]; then
+    info "Safe restart complete — $restarted service(s) healthy"
+  elif [ "$failed" -eq 0 ] && [ "$restarted" -eq 0 ]; then
+    warn "No services to restart. Run './tamerclaw init' first to set up services."
   else
     err "$failed service(s) failed to restart. Check logs above."
   fi
