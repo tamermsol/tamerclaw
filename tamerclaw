@@ -1136,6 +1136,35 @@ EOF
   "
 }
 
+# ── Access Control ───────────────────────────────────────────────────────────
+cmd_allow_all() {
+  local allow_file="$SCRIPT_DIR/user/credentials/telegram-default-allowFrom.json"
+  mkdir -p "$(dirname "$allow_file")"
+  echo '{"allowAll":true}' > "$allow_file"
+  info "Bot is now PUBLIC — anyone can message your agents"
+  info "To restrict: tamerclaw restrict <telegram-user-id>"
+}
+
+cmd_restrict() {
+  local user_id="${1:-}"
+  local allow_file="$SCRIPT_DIR/user/credentials/telegram-default-allowFrom.json"
+  mkdir -p "$(dirname "$allow_file")"
+  if [ -z "$user_id" ]; then
+    # Show current state
+    if [ -f "$allow_file" ]; then
+      echo "Current allowlist:"
+      cat "$allow_file"
+    else
+      echo "No allowlist file — bot is open to all by default"
+    fi
+    echo ""
+    echo "Usage: tamerclaw restrict <telegram-user-id>"
+    return
+  fi
+  echo "{\"users\":[$user_id],\"allowAll\":false}" > "$allow_file"
+  info "Bot restricted to Telegram user ID: $user_id"
+}
+
 # ── Main Dispatch ─────────────────────────────────────────────────────────────
 case "${1:-}" in
   init)       cmd_init ;;
@@ -1152,6 +1181,8 @@ case "${1:-}" in
   send)       cmd_send "${2:-}" "${3:-}" ;;
   cron-list)  cmd_cron_list ;;
   add-agent)  cmd_add_agent "${2:-}" "${3:-}" ;;
+  allow-all)  cmd_allow_all ;;
+  restrict)   cmd_restrict "${2:-}" ;;
   version|-v|--version)
     echo "TamerClaw v${VERSION}"
     ;;
@@ -1177,6 +1208,10 @@ case "${1:-}" in
     echo "    test [ID|--all]        Test Telegram connections"
     echo "    test-claude            Verify Claude CLI works"
     echo "    send ID 'message'      Send message to agent"
+    echo ""
+    echo "  ${BOLD}Access:${NC}"
+    echo "    allow-all              Make bot public (anyone can message)"
+    echo "    restrict [USER_ID]     Restrict to specific Telegram user"
     echo ""
     echo "  ${BOLD}Cron:${NC}"
     echo "    cron-list              List scheduled jobs"
