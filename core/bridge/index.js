@@ -63,8 +63,6 @@ async function restoreSessionsFromDisk(config) {
     // Check multiple directories for session files
     const sessionDirs = [
       getSessionDir(agentId),                                              // tamerclaw user dir
-      path.join('/root/claude-agents/agents', agentId, 'sessions'),        // live system agent dir
-      path.join('/root/claude-agents/user/agents', agentId, 'sessions'),   // live system user/agents dir
     ];
     for (const sessionDir of sessionDirs) {
       try {
@@ -186,8 +184,6 @@ function loadSession(agentId, chatId) {
   // Check multiple session directories
   const candidates = [
     path.join(getSessionDir(agentId), `${chatId}.json`),
-    path.join('/root/claude-agents/agents', agentId, 'sessions', `${chatId}.json`),
-    path.join('/root/claude-agents/user/agents', agentId, 'sessions', `${chatId}.json`),
   ];
   for (const filePath of candidates) {
     if (fs.existsSync(filePath)) {
@@ -1214,8 +1210,6 @@ const bridgeInterface = {
     const seenChatIds = new Set([...chatIds].map(String));
     const sessionDirs = [
       getSessionDir(agentId),                                              // tamerclaw user dir
-      path.join('/root/claude-agents/agents', agentId, 'sessions'),        // live system agent dir
-      path.join('/root/claude-agents/user/agents', agentId, 'sessions'),   // live system user/agents dir
     ];
     for (const sessionDir of sessionDirs) {
       try {

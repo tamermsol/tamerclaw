@@ -30,8 +30,7 @@ function getAgentActivity(agentId) {
 // ── Disk-based session reader (for standalone gateway mode) ──
 
 // Search multiple possible session directories (tamerclaw user dir + live system)
-const LIVE_AGENTS_DIR = '/root/claude-agents/agents';
-const LIVE_USER_AGENTS_DIR = '/root/claude-agents/user/agents';
+// All agent dirs resolved from TAMERCLAW_HOME via paths module (no hardcoded /root/)
 
 function _readSessionDir(sessionDir) {
   const result = [];
@@ -61,28 +60,8 @@ function _readSessionDir(sessionDir) {
 }
 
 function readAgentSessionsFromDisk(agentId) {
-  // Check tamerclaw user dir first
+  // Read sessions from tamerclaw user dir (the only canonical location)
   const result = _readSessionDir(paths.sessions(agentId));
-  // Also check live system sessions (bridge writes here)
-  const liveDir = path.join(LIVE_AGENTS_DIR, agentId, 'sessions');
-  const liveResults = _readSessionDir(liveDir);
-  // Also check live user/agents path (API-originated sessions saved here)
-  const liveUserDir = path.join(LIVE_USER_AGENTS_DIR, agentId, 'sessions');
-  const liveUserResults = _readSessionDir(liveUserDir);
-  // Merge, dedup by chatId
-  const seen = new Set(result.map(r => r.chatId));
-  for (const r of liveResults) {
-    if (!seen.has(r.chatId)) {
-      result.push(r);
-      seen.add(r.chatId);
-    }
-  }
-  for (const r of liveUserResults) {
-    if (!seen.has(r.chatId)) {
-      result.push(r);
-      seen.add(r.chatId);
-    }
-  }
   // Sort by lastActivity descending
   result.sort((a, b) => {
     const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
@@ -245,7 +224,7 @@ function extractMediaFromResponse(responseText, agentId) {
     let filePath = mediaTagMatch[1];
     // Resolve relative paths against agent workspace
     if (filePath.startsWith('./') && agentId) {
-      const agentWs = path.join('/root/claude-agents/agents', agentId, 'workspace');
+      const agentWs = path.join(paths.agentDir(agentId), 'workspace');
       const candidate = path.join(agentWs, filePath.slice(2));
       if (fs.existsSync(candidate)) filePath = candidate;
     }
@@ -477,7 +456,7 @@ async function handleRequest(req, res) {
       if (!filePath) return json(res, 400, { error: 'path parameter required' });
 
       // Security: only serve files from known agent directories
-      const allowedPrefixes = ['/root/claude-agents/agents/', '/root/.openclaw/', '/tmp/'];
+      const allowedPrefixes = [paths.agents + '/', paths.user + '/', '/tmp/'];
       const isAllowed = allowedPrefixes.some(prefix => filePath.startsWith(prefix));
       if (!isAllowed) return json(res, 403, { error: 'Access denied' });
 
@@ -555,7 +534,6 @@ async function handleRequest(req, res) {
       // Fallback: load from disk directly (check both tamerclaw user dir and live system)
       const candidates = [
         path.join(paths.sessions(agentId), `${chatId}.json`),
-        path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
       ];
       for (const sessionFile of candidates) {
         if (fs.existsSync(sessionFile)) {
@@ -593,7 +571,7 @@ async function handleRequest(req, res) {
 
         if (files.length > 0) {
           // Save uploaded file to agent's media directory
-          const mediaDir = path.join('/root/claude-agents/agents', agentId, 'media');
+          const mediaDir = paths.agentMedia(agentId);
           if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
           const file = files[0];
           const ext = path.extname(file.filename) || '.m4a';
@@ -880,7 +858,6 @@ async function handleRequest(req, res) {
         if (!history) {
           const candidates = [
             path.join(paths.sessions(agentId), `${chatId}.json`),
-            path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
           ];
           for (const sessionFile of candidates) {
             if (fs.existsSync(sessionFile)) {
