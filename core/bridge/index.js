@@ -527,11 +527,13 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
 
   return new Promise((resolve, reject) => {
 
+    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
     const args = [
       '-p', userMessage,
       '--output-format', 'text',
-      '--max-turns', '5',
+      '--max-turns', '200',
       '--model', modelFlag,
+      '--allowedTools', tools,
       '--append-system-prompt', systemPrompt
     ];
 
