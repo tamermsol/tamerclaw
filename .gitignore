@@ -1,12 +1,5 @@
 # User data — never committed
-user/config.json
-user/agents/
-user/credentials/
-user/sessions/
-user/logs/
-user/delivery-queue/
-user/cron/runs/
-user/cron/jobs.json
+user/
 
 # Node
 node_modules/
@@ -21,3 +14,24 @@ core/supreme/node_modules/
 
 # Lockfiles generated locally
 package-lock.json
+
+# Stray binaries / transcriptions
+*.apk
+*.oga
+
+# Mobile app artifacts
+mobile/*.apk
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/.metadata
+
+# Agent memory
+.claude/
