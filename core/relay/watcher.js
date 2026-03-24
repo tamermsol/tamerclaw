@@ -597,7 +597,9 @@ async function callOpenAICompatible(message, agentId, chatId, modelConfig, media
     stream: false
   };
 
-  const payloadFile = path.join(os.tmpdir(), `tamerclaw-relay-${agentId}-openai-payload.json`);
+  const tmpDir = paths.tmp;
+  await ensureDir(tmpDir);
+  const payloadFile = path.join(tmpDir, `tamerclaw-relay-${agentId}-openai-payload.json`);
   await fsp.writeFile(payloadFile, JSON.stringify(payload));
 
   // Resolve the API key from environment variable

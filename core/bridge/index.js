@@ -406,7 +406,9 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
   }
 
   const agent = config.agents[agentId];
-  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(os.tmpdir(), 'claude-sandbox');
+  const tmpDir = paths.tmp;
+  await ensureDir(tmpDir);
+  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(tmpDir, 'claude-sandbox');
   await ensureDir(cwd);
 
   log.log(`Calling ${mc.provider}/${mc.modelId} for chat ${chatId}...`);
@@ -422,7 +424,7 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
     stream: false
   };
 
-  const payloadFile = path.join(os.tmpdir(), `claude-agent-${agentId}-openai-payload.json`);
+  const payloadFile = path.join(tmpDir, `claude-agent-${agentId}-openai-payload.json`);
   await fsp.writeFile(payloadFile, JSON.stringify(payload));
 
   return new Promise((resolve, reject) => {
@@ -505,7 +507,9 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
 
   // Build system prompt and write to temp file (avoids arg length issues)
   const systemPrompt = await buildSystemPromptAsync(agentId);
-  const systemPromptFile = path.join(os.tmpdir(), `claude-agent-${agentId}-system.md`);
+  const tmpDir = paths.tmp;
+  await ensureDir(tmpDir);
+  const systemPromptFile = path.join(tmpDir, `claude-agent-${agentId}-system.md`);
   await fsp.writeFile(systemPromptFile, systemPrompt);
 
   // Build the user message
@@ -516,13 +520,13 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
 
   // Use agent's legacy workspace as cwd so Claude Code has project context
   const agent = config.agents[agentId];
-  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(os.tmpdir(), 'claude-sandbox');
+  const cwd = agent?.legacyWorkspace || agent?.workspace || path.join(tmpDir, 'claude-sandbox');
   await ensureDir(cwd);
 
   log.log(`Calling claude code (model: ${modelFlag}) for chat ${chatId} in ${cwd}...`);
 
   // Write prompt to temp file to avoid shell escaping issues
-  const promptFile = path.join(os.tmpdir(), `claude-agent-${agentId}-prompt.txt`);
+  const promptFile = path.join(tmpDir, `claude-agent-${agentId}-prompt.txt`);
   await fsp.writeFile(promptFile, userMessage);
 
   return new Promise((resolve, reject) => {

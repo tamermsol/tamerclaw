@@ -314,8 +314,10 @@ function callClaude(message, chatId, mediaPath = null) {
 
     console.log(`[supreme] Processing: "${userMessage.slice(0, 100)}..."`);
 
-    const promptFile = path.join(os.tmpdir(), 'claude-supreme-prompt.txt');
-    const sysFile = path.join(os.tmpdir(), 'claude-supreme-sys.txt');
+    const tmpDir = paths.tmp;
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const promptFile = path.join(tmpDir, 'claude-supreme-prompt.txt');
+    const sysFile = path.join(tmpDir, 'claude-supreme-sys.txt');
     fs.writeFileSync(promptFile, userMessage);
     fs.writeFileSync(sysFile, systemPrompt);
 

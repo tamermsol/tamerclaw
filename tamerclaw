@@ -343,6 +343,7 @@ cmd_init() {
   mkdir -p "$SCRIPT_DIR/user/delivery-queue/pending"
   mkdir -p "$SCRIPT_DIR/user/delivery-queue/failed"
   mkdir -p "$SCRIPT_DIR/user/cron/runs"
+  mkdir -p "$SCRIPT_DIR/user/tmp"
 
   # Generate gateway auth token
   local gw_token

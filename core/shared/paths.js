@@ -27,6 +27,7 @@ export const paths = {
   cronRuns: path.join(TAMERCLAW_HOME, 'user', 'cron', 'runs'),
   logs: path.join(TAMERCLAW_HOME, 'user', 'logs'),
   auditLog: path.join(TAMERCLAW_HOME, 'user', 'logs', 'config-audit.jsonl'),
+  tmp: path.join(TAMERCLAW_HOME, 'user', 'tmp'),
   deliveryQueue: path.join(TAMERCLAW_HOME, 'user', 'delivery-queue'),
   proxyState: path.join(TAMERCLAW_HOME, 'core', 'relay', 'proxy-state.json'),
   rateUsage: path.join(TAMERCLAW_HOME, 'core', 'shared', 'rate-usage.json'),
