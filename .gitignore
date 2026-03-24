@@ -7,6 +7,26 @@ core/bridge/node_modules/
 core/relay/node_modules/
 core/supreme/node_modules/
 
+# Runtime state files (should live in user/ but may be created by old versions)
+core/relay/proxy-state.json
+core/shared/rate-usage.json
+core/relay/outbox/
+core/relay/stream-outbox/
+core/relay/inbox.jsonl
+core/relay/processed.txt
+core/relay/current-agent.txt
+core/relay/processing.json
+core/relay/session-owners.json
+core/relay/agent-sessions.json
+core/relay/health.json
+core/relay/bot.lock
+core/supreme/outbox/
+core/supreme/inbox.jsonl
+core/supreme/processed.txt
+core/supreme/processing.json
+core/supreme/health.json
+core/supreme/bot.lock
+
 # OS
 .DS_Store
 *.swp

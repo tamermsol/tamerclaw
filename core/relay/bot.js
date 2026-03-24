@@ -45,20 +45,22 @@ if (!TOKEN) {
 }
 
 // ── Path Resolution ──────────────────────────────────────────────────────────
-const RELAY_DIR = paths.relay;
-const INBOX = path.join(RELAY_DIR, 'inbox.jsonl');
-const OUTBOX_DIR = path.join(RELAY_DIR, 'outbox');
-const STREAM_OUTBOX_DIR = path.join(RELAY_DIR, 'stream-outbox');
+// Runtime state in user/relay/ for workspace isolation (core/ is code only)
+const RELAY_RUNTIME = paths.relayRuntime;            // user/relay
+const INBOX = path.join(RELAY_RUNTIME, 'inbox.jsonl');
+const OUTBOX_DIR = paths.relayOutbox;                // user/relay/outbox
+const STREAM_OUTBOX_DIR = paths.relayStreamOutbox;   // user/relay/stream-outbox
 const AGENTS_DIR = paths.agents;
-const CURRENT_AGENT_FILE = path.join(RELAY_DIR, 'current-agent.txt');
+const CURRENT_AGENT_FILE = path.join(RELAY_RUNTIME, 'current-agent.txt');
 const CREDENTIALS_DIR = paths.credentials;
 
-if (!fs.existsSync(OUTBOX_DIR)) fs.mkdirSync(OUTBOX_DIR, { recursive: true });
-if (!fs.existsSync(STREAM_OUTBOX_DIR)) fs.mkdirSync(STREAM_OUTBOX_DIR, { recursive: true });
+for (const dir of [RELAY_RUNTIME, OUTBOX_DIR, STREAM_OUTBOX_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
 
 // ── Duplicate Process Guard ─────────────────────────────────────────────────
 // Prevent multiple relay bot.js from running (causes 409 Conflict on Telegram)
-const LOCK_FILE = path.join(RELAY_DIR, 'bot.lock');
+const LOCK_FILE = path.join(RELAY_RUNTIME, 'bot.lock');
 try {
   if (fs.existsSync(LOCK_FILE)) {
     const oldPid = fs.readFileSync(LOCK_FILE, 'utf-8').trim();
@@ -526,7 +528,7 @@ bot.on('callback_query', async (query) => {
 
 // ── Typing Indicator ─────────────────────────────────────────────────────────
 
-const PROCESSING_FILE = path.join(RELAY_DIR, 'processing.json');
+const PROCESSING_FILE = path.join(RELAY_RUNTIME, 'processing.json');
 setInterval(async () => {
   try {
     const content = await fsp.readFile(PROCESSING_FILE, 'utf-8');

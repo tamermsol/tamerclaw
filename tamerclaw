@@ -481,15 +481,18 @@ cmd_init() {
   # ── Step 6: Generate config ──
   info "Generating configuration..."
 
-  # Create user directories
+  # Create user directories (all runtime state lives here, never in core/)
   mkdir -p "$SCRIPT_DIR/user/agents/supreme/memory"
   mkdir -p "$SCRIPT_DIR/user/agents/supreme/sessions"
   mkdir -p "$SCRIPT_DIR/user/agents/supreme/media"
+  mkdir -p "$SCRIPT_DIR/user/agents/supreme/outbox"
   mkdir -p "$SCRIPT_DIR/user/credentials"
   mkdir -p "$SCRIPT_DIR/user/logs"
   mkdir -p "$SCRIPT_DIR/user/delivery-queue/pending"
   mkdir -p "$SCRIPT_DIR/user/delivery-queue/failed"
   mkdir -p "$SCRIPT_DIR/user/cron/runs"
+  mkdir -p "$SCRIPT_DIR/user/relay/outbox"
+  mkdir -p "$SCRIPT_DIR/user/relay/stream-outbox"
   mkdir -p "$SCRIPT_DIR/user/tmp"
 
   # Generate gateway auth token
@@ -858,6 +861,52 @@ cmd_update() {
   local commits_pulled
   commits_pulled=$(git -C "$SCRIPT_DIR" log --oneline "${old_head}..HEAD" 2>/dev/null | wc -l | tr -d ' ')
   info "Pulled $commits_pulled new commit(s)"
+
+  # ── Migrate runtime state from core/ to user/ (v1.10+ isolation fix) ──────
+  if [ -f "$SCRIPT_DIR/user/config.json" ]; then
+    # Create new runtime directories
+    mkdir -p "$SCRIPT_DIR/user/relay/outbox" "$SCRIPT_DIR/user/relay/stream-outbox"
+    mkdir -p "$SCRIPT_DIR/user/agents/supreme/outbox"
+
+    # Migrate relay runtime files
+    for f in inbox.jsonl processed.txt current-agent.txt processing.json session-owners.json agent-sessions.json health.json bot.lock; do
+      if [ -f "$SCRIPT_DIR/core/relay/$f" ]; then
+        mv "$SCRIPT_DIR/core/relay/$f" "$SCRIPT_DIR/user/relay/$f" 2>/dev/null && \
+          info "Migrated relay/$f → user/relay/" || true
+      fi
+    done
+    # Migrate relay outbox contents
+    if [ -d "$SCRIPT_DIR/core/relay/outbox" ] && ls "$SCRIPT_DIR/core/relay/outbox/"*.json &>/dev/null 2>&1; then
+      mv "$SCRIPT_DIR/core/relay/outbox/"*.json "$SCRIPT_DIR/user/relay/outbox/" 2>/dev/null && \
+        info "Migrated relay/outbox/ → user/relay/outbox/" || true
+    fi
+    if [ -d "$SCRIPT_DIR/core/relay/stream-outbox" ] && ls "$SCRIPT_DIR/core/relay/stream-outbox/"*.json &>/dev/null 2>&1; then
+      mv "$SCRIPT_DIR/core/relay/stream-outbox/"*.json "$SCRIPT_DIR/user/relay/stream-outbox/" 2>/dev/null && \
+        info "Migrated relay/stream-outbox/ → user/relay/stream-outbox/" || true
+    fi
+
+    # Migrate supreme runtime files
+    for f in inbox.jsonl processed.txt processing.json health.json bot.lock; do
+      if [ -f "$SCRIPT_DIR/core/supreme/$f" ]; then
+        mv "$SCRIPT_DIR/core/supreme/$f" "$SCRIPT_DIR/user/agents/supreme/$f" 2>/dev/null && \
+          info "Migrated supreme/$f → user/agents/supreme/" || true
+      fi
+    done
+    if [ -d "$SCRIPT_DIR/core/supreme/outbox" ] && ls "$SCRIPT_DIR/core/supreme/outbox/"*.json &>/dev/null 2>&1; then
+      mv "$SCRIPT_DIR/core/supreme/outbox/"*.json "$SCRIPT_DIR/user/agents/supreme/outbox/" 2>/dev/null && \
+        info "Migrated supreme/outbox/ → user/agents/supreme/outbox/" || true
+    fi
+
+    # Migrate shared state files
+    if [ -f "$SCRIPT_DIR/core/relay/proxy-state.json" ]; then
+      mv "$SCRIPT_DIR/core/relay/proxy-state.json" "$SCRIPT_DIR/user/proxy-state.json" 2>/dev/null && \
+        info "Migrated proxy-state.json → user/" || true
+    fi
+    if [ -f "$SCRIPT_DIR/core/shared/rate-usage.json" ]; then
+      mv "$SCRIPT_DIR/core/shared/rate-usage.json" "$SCRIPT_DIR/user/rate-usage.json" 2>/dev/null && \
+        info "Migrated rate-usage.json → user/" || true
+    fi
+  fi
 
   # Always reinstall dependencies after update to avoid stale/corrupt node_modules
   info "Installing/updating dependencies..."

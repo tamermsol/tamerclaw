@@ -27,7 +27,8 @@ if (!fs.existsSync(paths.config)) {
 const config = JSON.parse(fs.readFileSync(paths.config, 'utf-8'));
 const TOKEN = config.agents?.supreme?.botToken || '';
 const AGENT_ID = 'supreme';
-const SUPREME_DIR = paths.supreme;
+const SUPREME_CODE_DIR = paths.supreme;          // core/supreme (code only)
+const SUPREME_RUNTIME = paths.supremeRuntime;     // user/agents/supreme (runtime state)
 const AGENT_DIR = paths.agentDir('supreme');
 const AGENTS_DIR = paths.agents;
 const SHARED_DIR = paths.shared;
@@ -42,11 +43,12 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const INBOX = path.join(SUPREME_DIR, 'inbox.jsonl');
-const OUTBOX_DIR = path.join(SUPREME_DIR, 'outbox');
-const PROCESSED = path.join(SUPREME_DIR, 'processed.txt');
-const PROCESSING_FILE = path.join(SUPREME_DIR, 'processing.json');
-const HEALTH_FILE = path.join(SUPREME_DIR, 'health.json');
+// Runtime state files live under user/agents/supreme/ for workspace isolation
+const INBOX = path.join(SUPREME_RUNTIME, 'inbox.jsonl');
+const OUTBOX_DIR = path.join(SUPREME_RUNTIME, 'outbox');
+const PROCESSED = path.join(SUPREME_RUNTIME, 'processed.txt');
+const PROCESSING_FILE = path.join(SUPREME_RUNTIME, 'processing.json');
+const HEALTH_FILE = path.join(SUPREME_RUNTIME, 'health.json');
 
 // Ensure dirs
 for (const dir of [OUTBOX_DIR]) {
@@ -55,7 +57,7 @@ for (const dir of [OUTBOX_DIR]) {
 
 // ── Singleton Guard ──────────────────────────────────────────────────────────
 // Kill any OTHER supreme bot.js processes (not relay, not us) to prevent 409.
-const LOCK_FILE = path.join(SUPREME_DIR, 'bot.lock');
+const LOCK_FILE = path.join(SUPREME_RUNTIME, 'bot.lock');
 try {
   // Check if a previous supreme bot.js is still running via lock file
   if (fs.existsSync(LOCK_FILE)) {
@@ -223,9 +225,9 @@ ${new Date().toISOString().slice(0, 10)}
 
 ## CRITICAL: Self-Protection Rules
 - NEVER run: systemctl restart supreme-agent, systemctl stop supreme-agent, or kill commands targeting your own PID (${process.pid}) or bot.js processes
-- NEVER edit ${SUPREME_DIR}/bot.js — that is YOUR running code. Editing it triggers a restart loop.
+- NEVER edit ${SUPREME_CODE_DIR}/bot.js — that is YOUR running code. Editing it triggers a restart loop.
 - NEVER modify the supreme-agent service file
-- If you need to fix the supreme agent itself, write the fix plan to ${SUPREME_DIR}/outbox/ and tell the user to apply it manually
+- If you need to fix the supreme agent itself, write the fix plan to ${SUPREME_RUNTIME}/outbox/ and tell the user to apply it manually
 - You CAN safely restart OTHER services (like the bridge)
 
 ## Telegram Formatting

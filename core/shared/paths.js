@@ -29,8 +29,19 @@ export const paths = {
   auditLog: path.join(TAMERCLAW_HOME, 'user', 'logs', 'config-audit.jsonl'),
   tmp: path.join(TAMERCLAW_HOME, 'user', 'tmp'),
   deliveryQueue: path.join(TAMERCLAW_HOME, 'user', 'delivery-queue'),
-  proxyState: path.join(TAMERCLAW_HOME, 'core', 'relay', 'proxy-state.json'),
-  rateUsage: path.join(TAMERCLAW_HOME, 'core', 'shared', 'rate-usage.json'),
+
+  // Runtime state — lives in user/ for workspace isolation & update safety
+  proxyState: path.join(TAMERCLAW_HOME, 'user', 'proxy-state.json'),
+  rateUsage: path.join(TAMERCLAW_HOME, 'user', 'rate-usage.json'),
+
+  // Relay runtime directories — user-scoped so core/ stays clean
+  relayRuntime: path.join(TAMERCLAW_HOME, 'user', 'relay'),
+  relayOutbox: path.join(TAMERCLAW_HOME, 'user', 'relay', 'outbox'),
+  relayStreamOutbox: path.join(TAMERCLAW_HOME, 'user', 'relay', 'stream-outbox'),
+
+  // Supreme runtime — under user/agents/supreme/
+  supremeRuntime: path.join(TAMERCLAW_HOME, 'user', 'agents', 'supreme'),
+
   sessions: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId, 'sessions'),
   memory: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId, 'memory'),
   agentDir: (agentId) => path.join(TAMERCLAW_HOME, 'user', 'agents', agentId),

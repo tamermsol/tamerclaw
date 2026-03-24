@@ -37,23 +37,27 @@ import paths from '../shared/paths.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Paths ────────────────────────────────────────────────────────────────────
-const RELAY_DIR = paths.relay;
-const INBOX = path.join(RELAY_DIR, 'inbox.jsonl');
-const OUTBOX_DIR = path.join(RELAY_DIR, 'outbox');
-const PROCESSED = path.join(RELAY_DIR, 'processed.txt');
+// Runtime state lives in user/relay/ for workspace isolation (core/ is code only)
+const RELAY_DIR = paths.relay;                       // core/relay (code)
+const RELAY_RUNTIME = paths.relayRuntime;            // user/relay (runtime state)
+const INBOX = path.join(RELAY_RUNTIME, 'inbox.jsonl');
+const OUTBOX_DIR = paths.relayOutbox;                // user/relay/outbox
+const PROCESSED = path.join(RELAY_RUNTIME, 'processed.txt');
 const AGENTS_DIR = paths.agents;
 const SHARED_DIR = paths.shared;
 const CONFIG_PATH = paths.config;
-const CURRENT_AGENT_FILE = path.join(RELAY_DIR, 'current-agent.txt');
-const PROCESSING_FILE = path.join(RELAY_DIR, 'processing.json');
-const SESSION_OWNER_FILE = path.join(RELAY_DIR, 'session-owners.json');
-const AGENT_SESSIONS_FILE = path.join(RELAY_DIR, 'agent-sessions.json');
-const HEALTH_FILE = path.join(RELAY_DIR, 'health.json');
+const CURRENT_AGENT_FILE = path.join(RELAY_RUNTIME, 'current-agent.txt');
+const PROCESSING_FILE = path.join(RELAY_RUNTIME, 'processing.json');
+const SESSION_OWNER_FILE = path.join(RELAY_RUNTIME, 'session-owners.json');
+const AGENT_SESSIONS_FILE = path.join(RELAY_RUNTIME, 'agent-sessions.json');
+const HEALTH_FILE = path.join(RELAY_RUNTIME, 'health.json');
 
-const STREAM_OUTBOX_DIR = path.join(RELAY_DIR, 'stream-outbox');
+const STREAM_OUTBOX_DIR = paths.relayStreamOutbox;   // user/relay/stream-outbox
 
-if (!fs.existsSync(OUTBOX_DIR)) fs.mkdirSync(OUTBOX_DIR, { recursive: true });
-if (!fs.existsSync(STREAM_OUTBOX_DIR)) fs.mkdirSync(STREAM_OUTBOX_DIR, { recursive: true });
+// Ensure runtime directories exist
+for (const dir of [RELAY_RUNTIME, OUTBOX_DIR, STREAM_OUTBOX_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
 
 // ── Startup Cleanup ──────────────────────────────────────────────────────────
 // Clean stale state from previous crash/restart to prevent phantom behavior.
