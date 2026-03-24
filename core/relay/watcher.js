@@ -972,12 +972,14 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
         response = rawStdout.trim();
       }
 
-      // ── Auto-continue on max_turns ──
+      // ── Auto-continue on max_turns (regardless of exit code) ──
       const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
       const hitMaxTurns = stopReason === 'max_turns' ||
         (rawStdout || '').includes('Reached max turns') ||
-        (stderr || '').includes('Reached max turns');
-      if (code === 0 && hitMaxTurns) {
+        (rawStdout || '').includes('max_turns') ||
+        (stderr || '').includes('Reached max turns') ||
+        (stderr || '').match(/Reached max turns\s*\(\d+\)/);
+      if (hitMaxTurns) {
         const sessionId = existingSessionId || agentSessions[agentId]?.sessionId;
         if (sessionId) {
           console.log(`[${agentId}] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
@@ -1084,7 +1086,7 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
             // Use continuation response if available, otherwise fall back to original
             const finalResponse = contResponse || response;
 
-            if (rc === 0 && finalResponse) {
+            if (finalResponse) {
               incrementSessionMessageCount(agentId);
               console.log(`[${agentId}] Continuation completed: ${finalResponse.length} chars (${contToolCount} total tool ops)`);
               appendDailyMemory(agentId, userMessage, finalResponse.length);

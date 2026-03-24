@@ -441,7 +441,7 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
     const env = { ...process.env };
     env.HOME = process.env.HOME || os.homedir();
 
-    const proc = spawn('bash', ['-c', curlCmd], { cwd, env });
+    const proc = spawn('bash', ['-c', curlCmd], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
@@ -580,7 +580,7 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
     }
     env.HOME = process.env.HOME || os.homedir();
 
-    return spawn('claude', args, { cwd, env });
+    return spawn('claude', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   }
 
   // ── Run a single Claude call and parse stream-json ──
@@ -634,19 +634,21 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
     let response = extractText(result.parsedEvents);
     if (!response && result.rawStdout.trim()) response = result.rawStdout.trim();
 
-    // Detect max_turns — either from stream-json stop_reason or from error text
+    // Detect max_turns — either from stream-json stop_reason or from error text (regardless of exit code)
     const stopReason = extractStopReason(result.parsedEvents);
     const hitMaxTurns = stopReason === 'max_turns' ||
       (result.rawStdout || '').includes('Reached max turns') ||
-      (result.stderr || '').includes('Reached max turns');
+      (result.rawStdout || '').includes('max_turns') ||
+      (result.stderr || '').includes('Reached max turns') ||
+      (result.stderr || '').match(/Reached max turns\s*\(\d+\)/);
 
-    if (result.code === 0 && hitMaxTurns) {
+    if (hitMaxTurns) {
       const sessionId = extractSessionId(result.parsedEvents);
       if (sessionId) {
         log.log(`[${agentId}] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
         const contResult = await runClaude('Continue where you left off. Complete the task.', ['--resume', sessionId]);
         const contResponse = extractText(contResult.parsedEvents);
-        if (contResult.code === 0 && contResponse) {
+        if (contResponse) {
           log.log(`✅ Continuation: ${contResponse.length} chars`);
           appendToMemoryAsync(agentId, `Chat ${chatId}: ${message.slice(0, 100)}... → responded (continued)`).catch(() => {});
           activeCalls.delete(sessionKey);

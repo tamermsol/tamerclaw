@@ -681,11 +681,12 @@ function callClaude(message, chatId, mediaPath = null) {
         response = rawStdout.trim();
       }
 
-      // ── Auto-continue on max_turns ──
+      // ── Auto-continue on max_turns (regardless of exit code) ──
       const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
       // Detect max_turns from stream-json OR from raw text fallback
-      const hitMaxTurns = (code === 0 && stopReason === 'max_turns') ||
-        rawStdout.includes('Reached max turns') || stderr.includes('Reached max turns');
+      const hitMaxTurns = stopReason === 'max_turns' ||
+        rawStdout.includes('Reached max turns') || stderr.includes('Reached max turns') ||
+        rawStdout.includes('max_turns') || (stderr || '').match(/Reached max turns\s*\(\d+\)/);
 
       if (hitMaxTurns) {
         console.log('[supreme] Hit max_turns — auto-continuing...');
