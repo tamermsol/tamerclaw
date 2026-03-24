@@ -76,6 +76,78 @@ detect_systemd_mode() {
 }
 detect_systemd_mode
 
+# ── Multi-tenant user isolation ─────────────────────────────────────────────
+# Each user gets unique service names and ports to prevent conflicts
+TC_USER="$(whoami)"
+svc_name() { echo "tamerclaw-${TC_USER}-$1"; }
+SVC_BRIDGE="$(svc_name bridge)"
+SVC_SUPREME="$(svc_name supreme)"
+
+# Find a free gateway port (checks both listening ports and other TamerClaw configs)
+find_free_port() {
+  local port=${1:-19789}
+  local max_port=$((port + 100))
+  while [ "$port" -le "$max_port" ]; do
+    # Check if port is currently in use
+    if ! ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":${port}$"; then
+      # Also check no other TamerClaw config claims this port
+      local in_use=false
+      for conf in /home/*/tamerclaw/user/config.json /root/tamerclaw/user/config.json; do
+        [ -f "$conf" ] || continue
+        [ "$conf" = "$SCRIPT_DIR/user/config.json" ] && continue
+        local conf_port
+        conf_port=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$conf','utf-8')).gateway.port)}catch{}" 2>/dev/null || echo "")
+        if [ "$conf_port" = "$port" ]; then
+          in_use=true
+          break
+        fi
+      done
+      if ! $in_use; then
+        echo "$port"
+        return 0
+      fi
+    fi
+    port=$((port + 1))
+  done
+  # Fallback: use UID-based offset
+  echo $(( 19789 + ($(id -u) % 100) ))
+}
+
+# Read gateway port from this user's config
+get_gateway_port() {
+  if [ -f "$SCRIPT_DIR/user/config.json" ]; then
+    node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8')).gateway.port || 19789)" 2>/dev/null || echo "19789"
+  else
+    echo "19789"
+  fi
+}
+
+# Migrate old non-user-scoped services to user-scoped names
+migrate_old_services() {
+  local migrated=0
+  for svc_type in bridge supreme; do
+    local old_svc="tamerclaw-${svc_type}"
+    local new_svc="tamerclaw-${TC_USER}-${svc_type}"
+    local old_file="$SVC_DIR/${old_svc}.service"
+    local new_file="$SVC_DIR/${new_svc}.service"
+
+    # Only migrate if old exists, new doesn't, and old points to this user's install
+    if [ -f "$old_file" ] && [ ! -f "$new_file" ]; then
+      if grep -q "$SCRIPT_DIR" "$old_file" 2>/dev/null; then
+        info "Migrating service: $old_svc → $new_svc"
+        cp "$old_file" "$new_file"
+        sed -i "s/SyslogIdentifier=tamerclaw-${svc_type}/SyslogIdentifier=${new_svc}/" "$new_file"
+        $SCTL stop "$old_svc" 2>/dev/null || true
+        $SCTL disable "$old_svc" 2>/dev/null || true
+        $SCTL daemon-reload 2>/dev/null || true
+        $SCTL enable "$new_svc" 2>/dev/null || true
+        migrated=$((migrated + 1))
+      fi
+    fi
+  done
+  [ "$migrated" -gt 0 ] && info "Migrated $migrated service(s) to user-scoped names"
+}
+
 # Helper: write a service file (handles sudo for system mode)
 write_service_file() {
   local filename="$1"
@@ -547,7 +619,7 @@ SUPTOOLSEOF
       },
       gateway: {
         enabled: true,
-        port: 19789,
+        port: $(find_free_port),
         bind: 'loopback',
         auth: { mode: 'token', token: '$gw_token' }
       },
@@ -634,9 +706,9 @@ SUPTOOLSEOF
 Group=$(id -gn)"
   fi
 
-  # Write bridge service
-  write_service_file "tamerclaw-bridge.service" "[Unit]
-Description=TamerClaw Bridge (Telegram ↔ Claude Code)
+  # Write bridge service (user-scoped name)
+  write_service_file "${SVC_BRIDGE}.service" "[Unit]
+Description=TamerClaw Bridge [${TC_USER}] (Telegram ↔ Claude Code)
 After=network.target
 
 [Service]
@@ -652,14 +724,14 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-bridge
+SyslogIdentifier=$SVC_BRIDGE
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
 
-  # Write supreme service
-  write_service_file "tamerclaw-supreme.service" "[Unit]
-Description=TamerClaw Supreme Agent
+  # Write supreme service (user-scoped name)
+  write_service_file "${SVC_SUPREME}.service" "[Unit]
+Description=TamerClaw Supreme Agent [${TC_USER}]
 After=network.target
 
 [Service]
@@ -675,13 +747,13 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-supreme
+SyslogIdentifier=$SVC_SUPREME
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
 
   $SCTL daemon-reload 2>/dev/null || true
-  $SCTL enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+  $SCTL enable "$SVC_BRIDGE" "$SVC_SUPREME" 2>/dev/null || true
 
   # Persist systemd mode so subsequent commands use the same mode
   echo "$SYSTEMD_MODE" > "$SCRIPT_DIR/user/.systemd-mode"
@@ -766,7 +838,7 @@ cmd_update() {
   if echo "$pull_output" | grep -q "Already up to date"; then
     # Even if code is up to date, check if services need repair
     local svc_ok=true
-    for svc in tamerclaw-bridge tamerclaw-supreme; do
+    for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
       if ! $SCTL cat "$svc" &>/dev/null; then
         svc_ok=false
         break
@@ -812,8 +884,11 @@ cmd_update() {
 Group=$(id -gn)"
     fi
 
-    write_service_file "tamerclaw-bridge.service" "[Unit]
-Description=TamerClaw Bridge (Telegram ↔ Claude Code)
+    # Migrate old services if needed
+    migrate_old_services
+
+    write_service_file "${SVC_BRIDGE}.service" "[Unit]
+Description=TamerClaw Bridge [${TC_USER}] (Telegram ↔ Claude Code)
 After=network.target
 
 [Service]
@@ -829,13 +904,13 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-bridge
+SyslogIdentifier=$SVC_BRIDGE
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
 
-    write_service_file "tamerclaw-supreme.service" "[Unit]
-Description=TamerClaw Supreme Agent
+    write_service_file "${SVC_SUPREME}.service" "[Unit]
+Description=TamerClaw Supreme Agent [${TC_USER}]
 After=network.target
 
 [Service]
@@ -851,7 +926,7 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-supreme
+SyslogIdentifier=$SVC_SUPREME
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
@@ -862,7 +937,7 @@ WantedBy=$SVC_WANTED_BY"
 
   # Safe-restart only services that exist AND were running
   local services_restarted=0
-  for svc in tamerclaw-bridge tamerclaw-supreme; do
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
     if $SCTL cat "$svc" &>/dev/null && $SCTL is-active "$svc" &>/dev/null; then
       info "Restarting $svc..."
       if safe_restart_service "$svc"; then
@@ -895,27 +970,27 @@ cmd_start() {
 
   case "$target" in
     bridge)
-      $SCTL start tamerclaw-bridge
-      info "Bridge started. Logs: journalctl -u tamerclaw-bridge -f"
+      $SCTL start "$SVC_BRIDGE"
+      info "Bridge started. Logs: $JCTL -u $SVC_BRIDGE -f"
       ;;
     supreme)
-      $SCTL start tamerclaw-supreme
-      info "Supreme Agent started. Logs: journalctl -u tamerclaw-supreme -f"
+      $SCTL start "$SVC_SUPREME"
+      info "Supreme Agent started. Logs: $JCTL -u $SVC_SUPREME -f"
       ;;
     all|"")
-      if $SCTL start tamerclaw-bridge 2>/dev/null; then
+      if $SCTL start "$SVC_BRIDGE" 2>/dev/null; then
         info "Bridge started"
       else
         warn "Bridge failed to start"
         echo "    Checking logs..."
-        $JCTL -u tamerclaw-bridge -n 15 --no-pager 2>/dev/null || true
+        $JCTL -u "$SVC_BRIDGE" -n 15 --no-pager 2>/dev/null || true
       fi
-      if $SCTL start tamerclaw-supreme 2>/dev/null; then
+      if $SCTL start "$SVC_SUPREME" 2>/dev/null; then
         info "Supreme Agent started"
       else
         warn "Supreme failed to start"
         echo "    Checking logs..."
-        $JCTL -u tamerclaw-supreme -n 15 --no-pager 2>/dev/null || true
+        $JCTL -u "$SVC_SUPREME" -n 15 --no-pager 2>/dev/null || true
         echo ""
         echo "    Try running manually to debug:"
         echo "      cd $SCRIPT_DIR/core/supreme && TAMERCLAW_HOME=$SCRIPT_DIR node bot.js"
@@ -950,10 +1025,10 @@ cmd_start() {
 cmd_stop() {
   local target="${1:-all}"
   case "$target" in
-    bridge)  $SCTL stop tamerclaw-bridge; info "Bridge stopped" ;;
-    supreme) $SCTL stop tamerclaw-supreme; info "Supreme stopped" ;;
+    bridge)  $SCTL stop "$SVC_BRIDGE"; info "Bridge stopped" ;;
+    supreme) $SCTL stop "$SVC_SUPREME"; info "Supreme stopped" ;;
     all|"")
-      $SCTL stop tamerclaw-bridge 2>/dev/null; $SCTL stop tamerclaw-supreme 2>/dev/null
+      $SCTL stop "$SVC_BRIDGE" 2>/dev/null; $SCTL stop "$SVC_SUPREME" 2>/dev/null
       info "All services stopped"
       ;;
   esac
@@ -969,10 +1044,10 @@ SELF_PROTECTED_SERVICES=("tamerclaw-agent")
 resolve_services() {
   local target="$1"
   case "$target" in
-    bridge)  echo "tamerclaw-bridge" ;;
-    supreme) echo "tamerclaw-supreme" ;;
-    all|"")  echo "tamerclaw-bridge tamerclaw-supreme" ;;
-    *)       echo "tamerclaw-${target}" ;;
+    bridge)  echo "$SVC_BRIDGE" ;;
+    supreme) echo "$SVC_SUPREME" ;;
+    all|"")  echo "$SVC_BRIDGE $SVC_SUPREME" ;;
+    *)       echo "tamerclaw-${TC_USER}-${target}" ;;
   esac
 }
 
@@ -1138,8 +1213,8 @@ cmd_status() {
     exit 1
   fi
 
-  echo -e "${BOLD}Services:${NC}"
-  for svc in tamerclaw-bridge tamerclaw-supreme; do
+  echo -e "${BOLD}Services (user: ${TC_USER}):${NC}"
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
     if $SCTL is-active "$svc" &>/dev/null; then
       echo -e "  ${GREEN}●${NC} $svc (running)"
     else
@@ -1166,7 +1241,9 @@ cmd_status() {
   gw_token=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8')).gateway.auth.token)" 2>/dev/null || echo "")
   if [ -n "$gw_token" ]; then
     local health
-    health=$(curl -s -H "Authorization: Bearer $gw_token" http://127.0.0.1:19789/api/health 2>/dev/null || echo "")
+    local gw_port
+    gw_port=$(get_gateway_port)
+    health=$(curl -s -H "Authorization: Bearer $gw_token" "http://127.0.0.1:${gw_port}/api/health" 2>/dev/null || echo "")
     if [ -n "$health" ] && echo "$health" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const h=JSON.parse(d);console.log('Gateway: ✅ up | Uptime: '+Math.floor(h.uptime)+'s | Active bots: '+(h.activeBots||0))})" 2>/dev/null; then
       :
     else
@@ -1179,9 +1256,9 @@ cmd_status() {
 cmd_logs() {
   local target="${1:-all}"
   case "$target" in
-    bridge)  $JCTL -u tamerclaw-bridge -f --no-pager ;;
-    supreme) $JCTL -u tamerclaw-supreme -f --no-pager ;;
-    all|"")  $JCTL -u tamerclaw-bridge -u tamerclaw-supreme -f --no-pager ;;
+    bridge)  $JCTL -u "$SVC_BRIDGE" -f --no-pager ;;
+    supreme) $JCTL -u "$SVC_SUPREME" -f --no-pager ;;
+    all|"")  $JCTL -u "$SVC_BRIDGE" -u "$SVC_SUPREME" -f --no-pager ;;
   esac
 }
 
@@ -1252,7 +1329,7 @@ cmd_send() {
   gw_token=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8')).gateway.auth.token)" 2>/dev/null)
   curl -s -X POST -H "Authorization: Bearer $gw_token" -H "Content-Type: application/json" \
     -d "{\"message\":\"$message\"}" \
-    "http://127.0.0.1:19789/api/agents/$agent_id/message" | node -e "
+    "http://127.0.0.1:$(get_gateway_port)/api/agents/$agent_id/message" | node -e "
     let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
       try { console.log(JSON.parse(d).response || d); } catch { console.log(d); }
     })
@@ -1412,8 +1489,8 @@ cmd_doctor() {
 
   # Check systemd
   echo ""
-  echo -e "${BOLD}Systemd ($SYSTEMD_MODE mode):${NC}"
-  for svc in tamerclaw-bridge tamerclaw-supreme; do
+  echo -e "${BOLD}Systemd ($SYSTEMD_MODE mode, user: ${TC_USER}):${NC}"
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
     local svc_file="$SVC_DIR/${svc}.service"
     if [ -f "$svc_file" ]; then
       local status
@@ -1434,7 +1511,7 @@ cmd_doctor() {
 
   # Show recent errors for failed services
   echo ""
-  for svc in tamerclaw-bridge tamerclaw-supreme; do
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
     local status
     status=$($SCTL is-active "$svc" 2>/dev/null || echo "inactive")
     if [ "$status" = "failed" ] || [ "$status" = "inactive" ]; then
@@ -1446,7 +1523,7 @@ cmd_doctor() {
 
   # Check ExecStart path in service file
   echo -e "${BOLD}Service file checks:${NC}"
-  for svc in tamerclaw-bridge tamerclaw-supreme; do
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
     local svc_file="$SVC_DIR/${svc}.service"
     if [ -f "$svc_file" ]; then
       local exec_start
@@ -1499,8 +1576,11 @@ cmd_repair() {
 Group=$(id -gn)"
   fi
 
-  write_service_file "tamerclaw-bridge.service" "[Unit]
-Description=TamerClaw Bridge (Telegram ↔ Claude Code)
+  # Migrate old services first
+  migrate_old_services
+
+  write_service_file "${SVC_BRIDGE}.service" "[Unit]
+Description=TamerClaw Bridge [${TC_USER}] (Telegram ↔ Claude Code)
 After=network.target
 
 [Service]
@@ -1516,13 +1596,13 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-bridge
+SyslogIdentifier=$SVC_BRIDGE
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
 
-  write_service_file "tamerclaw-supreme.service" "[Unit]
-Description=TamerClaw Supreme Agent
+  write_service_file "${SVC_SUPREME}.service" "[Unit]
+Description=TamerClaw Supreme Agent [${TC_USER}]
 After=network.target
 
 [Service]
@@ -1538,7 +1618,7 @@ Environment=HOME=$HOME
 Environment=PATH=$svc_path
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=tamerclaw-supreme
+SyslogIdentifier=$SVC_SUPREME
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
@@ -1547,7 +1627,7 @@ WantedBy=$SVC_WANTED_BY"
   echo "$SYSTEMD_MODE" > "$SCRIPT_DIR/user/.systemd-mode"
 
   $SCTL daemon-reload 2>/dev/null || true
-  $SCTL enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+  $SCTL enable "$SVC_BRIDGE" "$SVC_SUPREME" 2>/dev/null || true
 
   if [ "$SYSTEMD_MODE" = "user" ]; then
     loginctl enable-linger "$(whoami)" 2>/dev/null || true
@@ -1566,6 +1646,7 @@ case "${1:-}" in
   status)     cmd_status ;;
   doctor)     cmd_doctor ;;
   repair)     cmd_repair ;;
+  migrate)    migrate_old_services ;;
   logs)       cmd_logs "${2:-}" ;;
   set-token)  cmd_set_token "${2:-}" "${3:-}" ;;
   agents)     cmd_agents ;;
