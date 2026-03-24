@@ -10,13 +10,54 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export TAMERCLAW_HOME="$SCRIPT_DIR"
 VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/version.json','utf-8')).version)" 2>/dev/null || echo "1.0.0")
 
-# Use sudo for systemctl/service commands when not running as root
-# NOTE: All $SUDO systemctl calls in this script use $SUDO prefix
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi
+# ── Systemd mode detection ──────────────────────────────────────────────────
+# Determines whether to use system-level (requires root/sudo) or user-level systemd.
+# Sets SCTL (systemctl command), SVC_DIR (service file directory), SVC_WANTED_BY.
+detect_systemd_mode() {
+  if [ "$(id -u)" -eq 0 ]; then
+    # Running as root — use system-level directly
+    SYSTEMD_MODE="system"
+    SCTL="systemctl"
+    JCTL="journalctl"
+    SVC_DIR="/etc/systemd/system"
+    SVC_WANTED_BY="multi-user.target"
+  elif sudo -n true 2>/dev/null; then
+    # Non-root with passwordless sudo
+    SYSTEMD_MODE="system"
+    SCTL="sudo systemctl"
+    JCTL="journalctl"
+    SVC_DIR="/etc/systemd/system"
+    SVC_WANTED_BY="multi-user.target"
+  elif command -v systemctl &>/dev/null && systemctl --user status 2>/dev/null | head -1 >/dev/null 2>&1; then
+    # Non-root, no sudo, but user-level systemd is available
+    SYSTEMD_MODE="user"
+    SCTL="systemctl --user"
+    JCTL="journalctl --user"
+    SVC_DIR="$HOME/.config/systemd/user"
+    SVC_WANTED_BY="default.target"
+    mkdir -p "$SVC_DIR"
+  else
+    # Fallback: attempt user-level systemd (no sudo, no passwordless sudo)
+    SYSTEMD_MODE="user"
+    SCTL="systemctl --user"
+    JCTL="journalctl --user"
+    SVC_DIR="$HOME/.config/systemd/user"
+    SVC_WANTED_BY="default.target"
+    mkdir -p "$SVC_DIR" 2>/dev/null || true
+  fi
+}
+detect_systemd_mode
+
+# Helper: write a service file (handles sudo for system mode)
+write_service_file() {
+  local filename="$1"
+  local content="$2"
+  if [ "$SYSTEMD_MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
+    echo "$content" | sudo tee "$SVC_DIR/$filename" > /dev/null
+  else
+    echo "$content" > "$SVC_DIR/$filename"
+  fi
+}
 
 # Colors
 RED='\033[0;31m'
@@ -146,13 +187,8 @@ scan_agents() {
   local found=()
   local search_dirs=("$HOME")
 
-  # Add /root if not already HOME
-  [ "$HOME" != "/root" ] && [ -d "/root" ] && search_dirs+=("/root")
-
-  # Check for existing claude-agents setups
-  for base in "$HOME" "/root"; do
-    [ -d "$base/claude-agents/agents" ] && search_dirs+=("$base/claude-agents/agents")
-  done
+  # Check for existing claude-agents setups under HOME
+  [ -d "$HOME/claude-agents/agents" ] && search_dirs+=("$HOME/claude-agents/agents")
 
   echo ""
   info "Scanning for existing Claude Code agents..."
@@ -517,28 +553,36 @@ SUPTOOLSEOF
     [[ ":$svc_path:" != *":$p:"* ]] && svc_path="$p:$svc_path"
   done
 
-  # Verify sudo access for non-root users
-  if [ -n "$SUDO" ]; then
-    info "Setting up systemd services (sudo required)..."
+  # Re-detect systemd mode (may prompt for sudo if needed)
+  if [ "$SYSTEMD_MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
     if ! sudo -n true 2>/dev/null; then
       echo "  sudo password needed to install systemd services:"
-      if ! sudo true; then
-        err "Cannot install systemd services without sudo access."
-        err "Either run as root or ensure sudo is configured for $(whoami)."
-        return 1
+      if sudo true 2>/dev/null; then
+        : # sudo worked with password prompt
+      else
+        # No sudo access — fall back to user-level systemd
+        warn "No sudo access. Trying user-level systemd services..."
+        SYSTEMD_MODE="user"
+        SCTL="systemctl --user"
+        JCTL="journalctl --user"
+        SVC_DIR="$HOME/.config/systemd/user"
+        SVC_WANTED_BY="default.target"
+        mkdir -p "$SVC_DIR"
       fi
     fi
   fi
 
-  # Add User/Group for non-root installations
+  info "Using $SYSTEMD_MODE-level systemd services (${SVC_DIR})"
+
+  # Add User/Group for system-level non-root installations
   local svc_user_line=""
-  if [ "$(id -u)" -ne 0 ]; then
+  if [ "$SYSTEMD_MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
     svc_user_line="User=$(whoami)
 Group=$(id -gn)"
   fi
 
-  $SUDO tee /etc/systemd/system/tamerclaw-bridge.service > /dev/null << SVCEOF
-[Unit]
+  # Write bridge service
+  write_service_file "tamerclaw-bridge.service" "[Unit]
 Description=TamerClaw Bridge (Telegram ↔ Claude Code)
 After=network.target
 
@@ -558,11 +602,10 @@ StandardError=journal
 SyslogIdentifier=tamerclaw-bridge
 
 [Install]
-WantedBy=multi-user.target
-SVCEOF
+WantedBy=$SVC_WANTED_BY"
 
-  $SUDO tee /etc/systemd/system/tamerclaw-supreme.service > /dev/null << SVCEOF
-[Unit]
+  # Write supreme service
+  write_service_file "tamerclaw-supreme.service" "[Unit]
 Description=TamerClaw Supreme Agent
 After=network.target
 
@@ -571,7 +614,7 @@ Type=simple
 ${svc_user_line}
 WorkingDirectory=$SCRIPT_DIR/core/supreme
 ExecStart=$(which node) bot.js
-ExecStartPre=/bin/bash -c 'pkill -f "node.*tamerclaw.*supreme/bot.js" 2>/dev/null || true; sleep 1'
+ExecStartPre=/bin/bash -c 'pkill -f \"node.*tamerclaw.*supreme/bot.js\" 2>/dev/null || true; sleep 1'
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
@@ -583,11 +626,17 @@ StandardError=journal
 SyslogIdentifier=tamerclaw-supreme
 
 [Install]
-WantedBy=multi-user.target
-SVCEOF
+WantedBy=$SVC_WANTED_BY"
 
-  $SUDO systemctl daemon-reload 2>/dev/null || true
-  $SUDO systemctl enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+  $SCTL daemon-reload 2>/dev/null || true
+  $SCTL enable tamerclaw-bridge tamerclaw-supreme 2>/dev/null || true
+
+  # For user-level systemd, enable lingering so services survive logout
+  if [ "$SYSTEMD_MODE" = "user" ]; then
+    if command -v loginctl &>/dev/null; then
+      loginctl enable-linger "$(whoami)" 2>/dev/null || warn "Could not enable linger — services may stop when you log out"
+    fi
+  fi
 
   # ── Done! ──
   echo ""
@@ -665,14 +714,14 @@ cmd_update() {
   fi
 
   # Reload systemd if service files changed
-  $SUDO systemctl daemon-reload 2>/dev/null || true
+  $SCTL daemon-reload 2>/dev/null || true
 
   # Safe-restart services that were running
   local restart_needed=0
-  if $SUDO systemctl is-active tamerclaw-bridge &>/dev/null; then
+  if $SCTL is-active tamerclaw-bridge &>/dev/null; then
     restart_needed=1
   fi
-  if $SUDO systemctl is-active tamerclaw-supreme &>/dev/null; then
+  if $SCTL is-active tamerclaw-supreme &>/dev/null; then
     restart_needed=1
   fi
 
@@ -700,16 +749,16 @@ cmd_start() {
 
   case "$target" in
     bridge)
-      $SUDO systemctl start tamerclaw-bridge
+      $SCTL start tamerclaw-bridge
       info "Bridge started. Logs: journalctl -u tamerclaw-bridge -f"
       ;;
     supreme)
-      $SUDO systemctl start tamerclaw-supreme
+      $SCTL start tamerclaw-supreme
       info "Supreme Agent started. Logs: journalctl -u tamerclaw-supreme -f"
       ;;
     all|"")
-      $SUDO systemctl start tamerclaw-bridge 2>/dev/null && info "Bridge started" || warn "Bridge failed to start"
-      $SUDO systemctl start tamerclaw-supreme 2>/dev/null && info "Supreme Agent started" || warn "Supreme failed to start"
+      $SCTL start tamerclaw-bridge 2>/dev/null && info "Bridge started" || warn "Bridge failed to start"
+      $SCTL start tamerclaw-supreme 2>/dev/null && info "Supreme Agent started" || warn "Supreme failed to start"
       echo ""
       info "All services started. Logs: tamerclaw logs"
       ;;
@@ -727,10 +776,10 @@ cmd_start() {
 cmd_stop() {
   local target="${1:-all}"
   case "$target" in
-    bridge)  $SUDO systemctl stop tamerclaw-bridge; info "Bridge stopped" ;;
-    supreme) $SUDO systemctl stop tamerclaw-supreme; info "Supreme stopped" ;;
+    bridge)  $SCTL stop tamerclaw-bridge; info "Bridge stopped" ;;
+    supreme) $SCTL stop tamerclaw-supreme; info "Supreme stopped" ;;
     all|"")
-      $SUDO systemctl stop tamerclaw-bridge 2>/dev/null; $SUDO systemctl stop tamerclaw-supreme 2>/dev/null
+      $SCTL stop tamerclaw-bridge 2>/dev/null; $SCTL stop tamerclaw-supreme 2>/dev/null
       info "All services stopped"
       ;;
   esac
@@ -773,7 +822,7 @@ wait_for_state() {
 
   while [ "$elapsed" -lt "$timeout" ]; do
     local state
-    state=$($SUDO systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    state=$($SCTL is-active "$svc" 2>/dev/null || echo "unknown")
     if [ "$state" = "$target_state" ]; then
       return 0
     fi
@@ -787,8 +836,8 @@ wait_for_state() {
 service_snapshot() {
   local svc="$1"
   local pid uptime_sec
-  pid=$($SUDO systemctl show "$svc" --property=MainPID --value 2>/dev/null || echo "0")
-  uptime_sec=$($SUDO systemctl show "$svc" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || echo "0")
+  pid=$($SCTL show "$svc" --property=MainPID --value 2>/dev/null || echo "0")
+  uptime_sec=$($SCTL show "$svc" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || echo "0")
   echo "${pid}:${uptime_sec}"
 }
 
@@ -803,19 +852,19 @@ safe_restart_service() {
     err "BLOCKED: Cannot restart '$svc' — this is a self-protected service."
     err "Restarting it would kill this agent's own process."
     echo "    If you really need to restart it, do it manually:"
-    echo "    $SUDO systemctl restart $svc"
+    echo "    $SCTL restart $svc"
     return 1
   fi
 
   # ── Check if service unit exists ──
-  if ! $SUDO systemctl cat "$svc" &>/dev/null; then
+  if ! $SCTL cat "$svc" &>/dev/null; then
     err "Service '$svc' does not exist."
     return 1
   fi
 
   # ── Pre-restart snapshot ──
   local was_active=0
-  if $SUDO systemctl is-active "$svc" &>/dev/null; then
+  if $SCTL is-active "$svc" &>/dev/null; then
     was_active=1
   fi
 
@@ -827,16 +876,16 @@ safe_restart_service() {
     info "Stopping $svc (PID $pre_pid)..."
 
     # Graceful stop (SIGTERM via systemd)
-    $SUDO systemctl stop "$svc" 2>/dev/null
+    $SCTL stop "$svc" 2>/dev/null
 
     # Wait for clean shutdown
     if wait_for_state "$svc" "inactive" "$max_stop_wait"; then
       info "$svc stopped cleanly"
     else
       warn "$svc did not stop within ${max_stop_wait}s — forcing..."
-      $SUDO systemctl kill "$svc" --signal=SIGKILL 2>/dev/null
+      $SCTL kill "$svc" --signal=SIGKILL 2>/dev/null
       sleep 2
-      if $SUDO systemctl is-active "$svc" &>/dev/null; then
+      if $SCTL is-active "$svc" &>/dev/null; then
         err "$svc is still running after SIGKILL. Manual intervention needed."
         return 1
       fi
@@ -848,7 +897,7 @@ safe_restart_service() {
 
   # ── Start the service ──
   info "Starting $svc..."
-  $SUDO systemctl start "$svc" 2>/dev/null
+  $SCTL start "$svc" 2>/dev/null
 
   # ── Post-start health check ──
   if wait_for_state "$svc" "active" "$max_start_wait"; then
@@ -860,11 +909,11 @@ safe_restart_service() {
   else
     # Service failed to come back up
     local status
-    status=$($SUDO systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    status=$($SCTL is-active "$svc" 2>/dev/null || echo "unknown")
     err "$svc failed to start (status: $status)"
     echo ""
     echo "  Recent logs:"
-    journalctl -u "$svc" --no-pager -n 10 --no-hostname 2>/dev/null || true
+    $JCTL -u "$svc" --no-pager -n 10 --no-hostname 2>/dev/null || true
     echo ""
     err "Service '$svc' needs manual attention."
     return 1
@@ -904,7 +953,7 @@ cmd_status() {
 
   echo -e "${BOLD}Services:${NC}"
   for svc in tamerclaw-bridge tamerclaw-supreme; do
-    if $SUDO systemctl is-active "$svc" &>/dev/null; then
+    if $SCTL is-active "$svc" &>/dev/null; then
       echo -e "  ${GREEN}●${NC} $svc (running)"
     else
       echo -e "  ${RED}●${NC} $svc (stopped)"
@@ -943,9 +992,9 @@ cmd_status() {
 cmd_logs() {
   local target="${1:-all}"
   case "$target" in
-    bridge)  journalctl -u tamerclaw-bridge -f --no-pager ;;
-    supreme) journalctl -u tamerclaw-supreme -f --no-pager ;;
-    all|"")  journalctl -u tamerclaw-bridge -u tamerclaw-supreme -f --no-pager ;;
+    bridge)  $JCTL -u tamerclaw-bridge -f --no-pager ;;
+    supreme) $JCTL -u tamerclaw-supreme -f --no-pager ;;
+    all|"")  $JCTL -u tamerclaw-bridge -u tamerclaw-supreme -f --no-pager ;;
   esac
 }
 
