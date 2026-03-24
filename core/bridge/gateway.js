@@ -11,8 +11,93 @@ import path from 'path';
 import { addJob, removeJob, listJobs, listAllJobs, updateJob } from '../cron/scheduler.js';
 import { readConfigCached } from '../shared/async-fs.js';
 import paths from '../shared/paths.js';
+import { transcribeAudio } from '../shared/transcribe.js';
 
 let bridgeRef = null; // Set by bridge on startup
+
+// ── In-memory agent activity tracking ──
+// Tracks real-time activity status per agent: "idle" | "thinking" | "working" | "responding"
+const agentActivity = new Map(); // agentId -> { status, since }
+
+function setAgentActivity(agentId, status) {
+  agentActivity.set(agentId, { status, since: new Date().toISOString() });
+}
+
+function getAgentActivity(agentId) {
+  return agentActivity.get(agentId) || { status: 'idle', since: new Date().toISOString() };
+}
+
+// ── Disk-based session reader (for standalone gateway mode) ──
+
+// Search multiple possible session directories (tamerclaw user dir + live system)
+const LIVE_AGENTS_DIR = '/root/claude-agents/agents';
+const LIVE_USER_AGENTS_DIR = '/root/claude-agents/user/agents';
+
+function _readSessionDir(sessionDir) {
+  const result = [];
+  try {
+    if (!fs.existsSync(sessionDir)) return result;
+    const files = fs.readdirSync(sessionDir);
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const chatId = path.basename(file, '.json');
+        const data = JSON.parse(fs.readFileSync(path.join(sessionDir, file), 'utf-8'));
+        const history = data.history || [];
+        const lastMsg = history.length > 0 ? history[history.length - 1] : null;
+        const firstMsg = history.length > 0 ? history[0] : null;
+        result.push({
+          chatId: String(chatId),
+          messageCount: history.length,
+          lastActivity: data.lastActivity || null,
+          startedAt: firstMsg?.timestamp || data.lastActivity || null,
+          summary: lastMsg ? (lastMsg.content || lastMsg.text || '').substring(0, 120) : '',
+          preview: firstMsg ? (firstMsg.content || firstMsg.text || '').substring(0, 80) : '',
+        });
+      } catch {}
+    }
+  } catch {}
+  return result;
+}
+
+function readAgentSessionsFromDisk(agentId) {
+  // Check tamerclaw user dir first
+  const result = _readSessionDir(paths.sessions(agentId));
+  // Also check live system sessions (bridge writes here)
+  const liveDir = path.join(LIVE_AGENTS_DIR, agentId, 'sessions');
+  const liveResults = _readSessionDir(liveDir);
+  // Also check live user/agents path (API-originated sessions saved here)
+  const liveUserDir = path.join(LIVE_USER_AGENTS_DIR, agentId, 'sessions');
+  const liveUserResults = _readSessionDir(liveUserDir);
+  // Merge, dedup by chatId
+  const seen = new Set(result.map(r => r.chatId));
+  for (const r of liveResults) {
+    if (!seen.has(r.chatId)) {
+      result.push(r);
+      seen.add(r.chatId);
+    }
+  }
+  for (const r of liveUserResults) {
+    if (!seen.has(r.chatId)) {
+      result.push(r);
+      seen.add(r.chatId);
+    }
+  }
+  // Sort by lastActivity descending
+  result.sort((a, b) => {
+    const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+    const tb = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+    return tb - ta;
+  });
+  return result;
+}
+
+function getAgentSessions(agentId) {
+  if (bridgeRef?.getAgentSessions) {
+    return bridgeRef.getAgentSessions(agentId);
+  }
+  return readAgentSessionsFromDisk(agentId);
+}
 
 export function setBridge(bridge) {
   bridgeRef = bridge;
@@ -35,15 +120,196 @@ function parseBody(req) {
   });
 }
 
+/**
+ * Parse multipart/form-data requests (for file uploads like voice notes).
+ * Returns { fields: { key: value }, files: [{ fieldName, filename, mimeType, data (Buffer) }] }
+ */
+function parseMultipart(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('error', reject);
+    req.on('end', () => {
+      try {
+        const buf = Buffer.concat(chunks);
+        const contentType = req.headers['content-type'] || '';
+        const boundaryMatch = contentType.match(/boundary=(.+?)(?:;|$)/);
+        if (!boundaryMatch) return resolve({ fields: {}, files: [] });
+
+        const boundary = boundaryMatch[1].trim();
+        const delimiter = Buffer.from(`--${boundary}`);
+        const fields = {};
+        const files = [];
+
+        // Split buffer by boundary
+        let start = 0;
+        const parts = [];
+        while (true) {
+          const idx = buf.indexOf(delimiter, start);
+          if (idx === -1) break;
+          if (start > 0) parts.push(buf.slice(start, idx));
+          start = idx + delimiter.length;
+          // Skip \r\n after boundary
+          if (buf[start] === 0x0d && buf[start + 1] === 0x0a) start += 2;
+          // Check for closing --
+          if (buf[start] === 0x2d && buf[start + 1] === 0x2d) break;
+        }
+
+        for (const part of parts) {
+          // Find the header/body separator (\r\n\r\n)
+          const sepIdx = part.indexOf('\r\n\r\n');
+          if (sepIdx === -1) continue;
+
+          const headerStr = part.slice(0, sepIdx).toString('utf-8');
+          // Body ends before trailing \r\n
+          let body = part.slice(sepIdx + 4);
+          if (body.length >= 2 && body[body.length - 2] === 0x0d && body[body.length - 1] === 0x0a) {
+            body = body.slice(0, -2);
+          }
+
+          const nameMatch = headerStr.match(/name="([^"]+)"/);
+          if (!nameMatch) continue;
+          const fieldName = nameMatch[1];
+
+          const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+          if (filenameMatch) {
+            const mimeMatch = headerStr.match(/Content-Type:\s*(.+)/i);
+            files.push({
+              fieldName,
+              filename: filenameMatch[1],
+              mimeType: mimeMatch ? mimeMatch[1].trim() : 'application/octet-stream',
+              data: body,
+            });
+          } else {
+            fields[fieldName] = body.toString('utf-8');
+          }
+        }
+
+        resolve({ fields, files });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function isMultipart(req) {
+  return (req.headers['content-type'] || '').includes('multipart/form-data');
+}
+
 function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
 }
 
+// ── Media extraction helpers ──
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'];
+
+/**
+ * Extract image file paths from agent response text.
+ * Agents often reference generated images by absolute path.
+ * Returns { cleanText, media: [{ url, filename, mimeType }] }
+ */
+function extractMediaFromResponse(responseText, agentId) {
+  const media = [];
+  let cleanText = responseText;
+
+  const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'];
+  const mimeTypes = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp',
+  };
+
+  function addMedia(filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const filename = path.basename(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        if (!imageExts.includes(ext)) return false;
+        media.push({
+          url: `/api/media?path=${encodeURIComponent(filePath)}`,
+          filename,
+          mimeType: mimeTypes[ext] || 'image/png',
+          size: fs.statSync(filePath).size,
+        });
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  // 1. Handle MEDIA: tags (e.g., MEDIA:/root/path/to/image.png or MEDIA:./relative/path.png)
+  const mediaTagRegex = /MEDIA:(\.\/[^\s\n]+|\/[^\s\n]+)/g;
+  let mediaTagMatch;
+  while ((mediaTagMatch = mediaTagRegex.exec(responseText)) !== null) {
+    let filePath = mediaTagMatch[1];
+    // Resolve relative paths against agent workspace
+    if (filePath.startsWith('./') && agentId) {
+      const agentWs = path.join('/root/claude-agents/agents', agentId, 'workspace');
+      const candidate = path.join(agentWs, filePath.slice(2));
+      if (fs.existsSync(candidate)) filePath = candidate;
+    }
+    addMedia(filePath);
+    // Remove the MEDIA: tag from text
+    cleanText = cleanText.replace(mediaTagMatch[0], '');
+  }
+
+  // 2. Match bare absolute file paths to images
+  const pathRegex = /(\/(?:root|home|tmp)\/[^\s"'<>|*?\n]+\.(?:png|jpg|jpeg|gif|webp|svg|bmp))/gi;
+  const bareMatches = cleanText.match(pathRegex) || [];
+  for (const filePath of bareMatches) {
+    // Only add if not already captured via MEDIA: tag
+    if (!media.some(m => m.url.includes(encodeURIComponent(filePath)))) {
+      addMedia(filePath);
+    }
+  }
+
+  // Clean up extra blank lines left by removed tags
+  cleanText = cleanText.replace(/\n{3,}/g, '\n\n').trim();
+
+  return { cleanText, media };
+}
+
 // ── Auth helpers ──
 
 const AUTH_FILE = path.join(paths.user, 'auth.json');
-const sessions = new Map(); // token -> { username, createdAt }
+const SESSIONS_FILE = path.join(paths.user, 'sessions.json');
+const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+const sessions = new Map(); // token -> { username, role, createdAt }
+
+function loadSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      const now = Date.now();
+      let cleaned = 0;
+      for (const [token, session] of Object.entries(data)) {
+        if (now - session.createdAt < SESSION_TTL) {
+          sessions.set(token, session);
+        } else {
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) saveSessions();
+      console.log(`[gateway] Restored ${sessions.size} sessions (cleaned ${cleaned} expired)`);
+    }
+  } catch (e) {
+    console.error(`[gateway] Failed to load sessions: ${e.message}`);
+  }
+}
+
+function saveSessions() {
+  try {
+    fs.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
+    const obj = Object.fromEntries(sessions);
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error(`[gateway] Failed to save sessions: ${e.message}`);
+  }
+}
+
+// Load persisted sessions on startup
+loadSessions();
 
 function loadAuthUsers() {
   try {
@@ -103,7 +369,15 @@ function authenticate(req, config) {
   }
   const token = auth.replace('Bearer ', '');
   // Check session tokens first
-  if (sessions.has(token)) return true;
+  if (sessions.has(token)) {
+    const sess = sessions.get(token);
+    if (Date.now() - sess.createdAt > SESSION_TTL) {
+      sessions.delete(token);
+      saveSessions();
+      return false;
+    }
+    return true;
+  }
   // Fall back to legacy static token
   if (gw?.auth?.token && token === gw.auth.token) return true;
   return false;
@@ -155,6 +429,7 @@ async function handleRequest(req, res) {
         role: user.role || 'admin',
         createdAt: Date.now(),
       });
+      saveSessions();
 
       return json(res, 200, {
         token: sessionToken,
@@ -196,18 +471,64 @@ async function handleRequest(req, res) {
       return json(res, 401, { error: 'Unauthorized' });
     }
 
+    // ── Serve media files ──
+    if (pathname === '/api/media' && method === 'GET') {
+      const filePath = url.searchParams.get('path');
+      if (!filePath) return json(res, 400, { error: 'path parameter required' });
+
+      // Security: only serve files from known agent directories
+      const allowedPrefixes = ['/root/claude-agents/agents/', '/root/.openclaw/', '/tmp/'];
+      const isAllowed = allowedPrefixes.some(prefix => filePath.startsWith(prefix));
+      if (!isAllowed) return json(res, 403, { error: 'Access denied' });
+
+      if (!fs.existsSync(filePath)) return json(res, 404, { error: 'File not found' });
+
+      try {
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes = {
+          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+          '.bmp': 'image/bmp', '.mp4': 'video/mp4', '.pdf': 'application/pdf',
+        };
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        const stat = fs.statSync(filePath);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Cache-Control': 'public, max-age=3600',
+        });
+        fs.createReadStream(filePath).pipe(res);
+        return;
+      } catch (err) {
+        return json(res, 500, { error: 'Failed to read file' });
+      }
+    }
+
     // ── Agents ──
     if (pathname === '/api/agents' && method === 'GET') {
       const botStatuses = bridgeRef?.getBotStatuses?.() || {};
-      const agents = Object.entries(config.agents).map(([id, a]) => ({
-        id,
-        telegramAccount: a.telegramAccount,
-        hasToken: !!a.botToken,
-        model: a.model || config.defaults.model,
-        workspace: a.workspace,
-        isActive: !!botStatuses[id]?.active,
-        sessions: botStatuses[id]?.sessions || 0,
-      }));
+      const agents = Object.entries(config.agents).map(([id, a]) => {
+        // Get full session data including disk-persisted sessions
+        let sessionCount = botStatuses[id]?.sessions || 0;
+        let lastActivity = null;
+        const agentSessions = getAgentSessions(id);
+        if (agentSessions.length > 0) {
+          sessionCount = Math.max(sessionCount, agentSessions.length);
+          // Most recent activity from sorted sessions (already sorted desc)
+          lastActivity = agentSessions[0].lastActivity || null;
+        }
+        return {
+          id,
+          telegramAccount: a.telegramAccount,
+          hasToken: !!a.botToken,
+          model: a.model || config.defaults.model,
+          workspace: a.workspace,
+          isActive: !!botStatuses[id]?.active,
+          sessions: sessionCount,
+          lastActivity,
+          activityStatus: getAgentActivity(id).status,
+        };
+      });
       return json(res, 200, { agents });
     }
 
@@ -216,13 +537,7 @@ async function handleRequest(req, res) {
       const agentId = pathname.split('/')[3];
       if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
 
-      const sessionsList = [];
-      if (bridgeRef?.getAgentSessions) {
-        const agentSessions = bridgeRef.getAgentSessions(agentId);
-        for (const sess of agentSessions) {
-          sessionsList.push(sess);
-        }
-      }
+      const sessionsList = getAgentSessions(agentId);
       return json(res, 200, { sessions: sessionsList });
     }
 
@@ -237,6 +552,30 @@ async function handleRequest(req, res) {
         const history = bridgeRef.getSessionHistory(agentId, chatId);
         if (history) return json(res, 200, history);
       }
+      // Fallback: load from disk directly (check both tamerclaw user dir and live system)
+      const candidates = [
+        path.join(paths.sessions(agentId), `${chatId}.json`),
+        path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
+      ];
+      for (const sessionFile of candidates) {
+        if (fs.existsSync(sessionFile)) {
+          try {
+            const data = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+            const history = (data.history || []).map(msg => ({
+              role: msg.role || (msg.isUser ? 'user' : 'assistant'),
+              content: msg.content || msg.text || '',
+              timestamp: msg.timestamp || null,
+            }));
+            return json(res, 200, {
+              chatId: String(chatId),
+              agentId,
+              messageCount: history.length,
+              lastActivity: data.lastActivity || null,
+              messages: history,
+            });
+          } catch {}
+        }
+      }
       return json(res, 404, { error: 'Session not found' });
     }
 
@@ -244,12 +583,140 @@ async function handleRequest(req, res) {
     if (pathname.match(/^\/api\/agents\/[\w-]+\/message$/) && method === 'POST') {
       const agentId = pathname.split('/')[3];
       if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
-      const body = await parseBody(req);
+
+      let body, mediaPath = null;
+
+      if (isMultipart(req)) {
+        // Handle file uploads (voice notes, images, etc.)
+        const { fields, files } = await parseMultipart(req);
+        body = { message: fields.message || '', chatId: fields.chatId };
+
+        if (files.length > 0) {
+          // Save uploaded file to agent's media directory
+          const mediaDir = path.join('/root/claude-agents/agents', agentId, 'media');
+          if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+          const file = files[0];
+          const ext = path.extname(file.filename) || '.m4a';
+          const savedName = `${Date.now()}${ext}`;
+          mediaPath = path.join(mediaDir, savedName);
+          fs.writeFileSync(mediaPath, file.data);
+
+          // Auto-transcribe voice notes so all agents can understand them
+          const voiceExts = ['.m4a', '.ogg', '.oga', '.opus', '.mp3', '.wav', '.webm'];
+          if (voiceExts.includes(ext.toLowerCase())) {
+            try {
+              console.log(`[gateway] Transcribing voice note: ${mediaPath}`);
+              const transcription = await transcribeAudio(mediaPath);
+              // Prepend transcription to user message
+              const userText = body.message && body.message !== '[Voice message]'
+                ? body.message
+                : '';
+              body.message = `[Voice message transcription]: "${transcription}"${userText ? `\n\nAdditional text: ${userText}` : ''}`;
+              console.log(`[gateway] Transcription complete: "${transcription.slice(0, 100)}"`);
+            } catch (err) {
+              console.error(`[gateway] Voice transcription failed: ${err.message}`);
+              // Fallback: still send with media path so agent can try to read it
+              if (!body.message) {
+                body.message = '[Voice message - transcription failed]';
+              }
+            }
+          } else if (!body.message) {
+            body.message = '[Media file attached]';
+          }
+        }
+      } else {
+        body = await parseBody(req);
+      }
+
       if (!body.message) return json(res, 400, { error: 'message required' });
 
+      // ── Intercept slash commands before they reach Claude ──
+      const msg = (body.message || '').trim();
+
+      if (msg === '/sessions') {
+        const agentSessionsList = getAgentSessions(agentId);
+        if (agentSessionsList.length === 0) {
+          return json(res, 200, { response: 'No sessions found for this agent.' });
+        }
+        const lines = [`📋 ${agentSessionsList.length} session(s) for ${agentId}:\n`];
+        for (const s of agentSessionsList) {
+          const age = s.lastActivity
+            ? new Date(s.lastActivity).toLocaleString('en-GB', { timeZone: 'Africa/Cairo', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })
+            : 'unknown';
+          lines.push(`• Chat ${s.chatId.slice(-6)} — ${s.messageCount} msgs — last active: ${age}`);
+          if (s.summary) lines.push(`  "${s.summary.substring(0, 80)}"`);
+        }
+        return json(res, 200, { response: lines.join('\n') });
+      }
+
+      if (msg === '/status') {
+        const botStatuses = bridgeRef?.getBotStatuses?.() || {};
+        const agentStatus = botStatuses[agentId];
+        const statusText = agentStatus
+          ? `✅ ${agentId} is ${agentStatus.active ? 'active' : 'inactive'} — ${agentStatus.sessions || 0} session(s)`
+          : `ℹ️ ${agentId} — no status available`;
+        return json(res, 200, { response: statusText });
+      }
+
+      if (msg === '/summary') {
+        const summSessions = getAgentSessions(agentId);
+        const totalMsgs = summSessions.reduce((sum, s) => sum + s.messageCount, 0);
+        const lines = [
+          `📊 Agent: ${agentId}`,
+          `Sessions: ${summSessions.length}`,
+          `Total messages: ${totalMsgs}`,
+        ];
+        if (summSessions.length > 0 && summSessions[0].lastActivity) {
+          lines.push(`Last active: ${new Date(summSessions[0].lastActivity).toLocaleString('en-GB', { timeZone: 'Africa/Cairo' })}`);
+        }
+        if (summSessions.length > 0 && summSessions[0].summary) {
+          lines.push(`Latest: "${summSessions[0].summary.substring(0, 100)}"`);
+        }
+        return json(res, 200, { response: lines.join('\n') });
+      }
+
+      if (msg === '/restart') {
+        return json(res, 200, { response: '⚠️ Restart must be triggered from the server. Use the Telegram bot or CLI.' });
+      }
+
       if (bridgeRef?.sendAgentMessage) {
-        const response = await bridgeRef.sendAgentMessage(agentId, body.message, body.chatId);
-        return json(res, 200, { response });
+        // Check for async/fire-and-forget mode (used by mobile app)
+        const asyncMode = url.searchParams.get('async') === 'true' || body.async === true || body.fireAndForget === 'true' || body.fireAndForget === true;
+
+        if (asyncMode) {
+          // Fire-and-forget: queue the message and return immediately
+          setAgentActivity(agentId, 'thinking');
+          const chatId = body.chatId || crypto.randomUUID();
+
+          // Process in background — don't await
+          bridgeRef.sendAgentMessage(agentId, body.message, chatId, mediaPath)
+            .then(() => {
+              setAgentActivity(agentId, 'idle');
+            })
+            .catch((err) => {
+              console.error(`[gateway] Async message error (agent=${agentId}, chat=${chatId}):`, err.message);
+              setAgentActivity(agentId, 'idle');
+            });
+
+          return json(res, 202, { queued: true, chatId });
+        }
+
+        // Synchronous mode (default — used by Telegram bridge)
+        // Track activity: agent is now thinking
+        setAgentActivity(agentId, 'thinking');
+        try {
+          const response = await bridgeRef.sendAgentMessage(agentId, body.message, body.chatId, mediaPath);
+          // Agent finished — back to idle
+          setAgentActivity(agentId, 'idle');
+          // Extract any image file paths from the response and include as media
+          const { cleanText, media } = extractMediaFromResponse(response || '', agentId);
+          const result = { response: cleanText };
+          if (media.length > 0) result.media = media;
+          return json(res, 200, result);
+        } catch (err) {
+          setAgentActivity(agentId, 'idle');
+          throw err;
+        }
       }
       return json(res, 503, { error: 'Bridge not ready' });
     }
@@ -348,8 +815,10 @@ async function handleRequest(req, res) {
       const totalAgents = Object.keys(config.agents).length;
       const activeAgents = Object.keys(botStatuses).length;
       let totalSessions = 0;
-      for (const bot of Object.values(botStatuses)) {
-        totalSessions += bot.sessions || 0;
+      // Count sessions from all agents (including disk-persisted ones)
+      for (const agentId of Object.keys(config.agents)) {
+        const agentSessions = getAgentSessions(agentId);
+        totalSessions += agentSessions.length;
       }
       return json(res, 200, {
         system: config.system,
@@ -362,6 +831,106 @@ async function handleRequest(req, res) {
         cron: { jobs: listAllJobs().length, jobCount: listAllJobs().length },
         delivery: { pending: bridgeRef?.getDeliveryQueue?.()?.length || 0 }
       });
+    }
+
+    // ── Stop agent ──
+    // POST /api/agents/:id/stop
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/stop$/) && method === 'POST') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+      const body = await parseBody(req);
+      const chatId = body.chatId || null;
+      if (bridgeRef?.stopAgent) {
+        const result = bridgeRef.stopAgent(agentId, chatId);
+        setAgentActivity(agentId, 'idle');
+        return json(res, 200, result);
+      }
+      return json(res, 503, { error: 'Bridge not ready' });
+    }
+
+    // ── Agent activity status ──
+    // GET /api/agents/:id/activity
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/activity$/) && method === 'GET') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+      const activity = getAgentActivity(agentId);
+      return json(res, 200, activity);
+    }
+
+    // ── Poll for new messages (2-way communication) ──
+    // GET /api/agents/:id/poll?chatId=xxx&since=ISO_TIMESTAMP
+    // Returns messages newer than `since` for the given chat session.
+    // If no chatId, returns latest activity across all sessions.
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/poll$/) && method === 'GET') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+
+      const chatId = url.searchParams.get('chatId');
+      const since = url.searchParams.get('since');
+      const sinceTime = since ? new Date(since).getTime() : 0;
+
+      if (chatId) {
+        // Poll specific session for new messages
+        let history = null;
+        if (bridgeRef?.getSessionHistory) {
+          const sessionData = bridgeRef.getSessionHistory(agentId, chatId);
+          if (sessionData) history = sessionData.messages || [];
+        }
+        // Fallback to disk
+        if (!history) {
+          const candidates = [
+            path.join(paths.sessions(agentId), `${chatId}.json`),
+            path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
+          ];
+          for (const sessionFile of candidates) {
+            if (fs.existsSync(sessionFile)) {
+              try {
+                const data = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+                history = (data.history || []).map(msg => ({
+                  role: msg.role || (msg.isUser ? 'user' : 'assistant'),
+                  content: msg.content || msg.text || '',
+                  timestamp: msg.timestamp || null,
+                }));
+                break;
+              } catch {}
+            }
+          }
+        }
+
+        if (!history) return json(res, 200, { messages: [], hasNew: false });
+
+        // Filter messages newer than `since`
+        const newMessages = sinceTime > 0
+          ? history.filter(m => m.timestamp && new Date(m.timestamp).getTime() > sinceTime)
+          : [];
+
+        // Extract media from assistant messages
+        const enrichedMessages = newMessages.map(m => {
+          if (m.role === 'assistant' || m.role === 'agent') {
+            const { cleanText, media } = extractMediaFromResponse(m.content || '', agentId);
+            if (media.length > 0) return { ...m, content: cleanText, media };
+          }
+          return m;
+        });
+
+        return json(res, 200, {
+          messages: enrichedMessages,
+          hasNew: enrichedMessages.length > 0,
+          totalMessages: history.length,
+          chatId,
+        });
+      } else {
+        // No chatId — return latest session activity summary
+        const agentSessionsList = getAgentSessions(agentId);
+        const recentSessions = agentSessionsList.filter(s => {
+          if (!s.lastActivity) return false;
+          return new Date(s.lastActivity).getTime() > sinceTime;
+        });
+        return json(res, 200, {
+          sessions: recentSessions,
+          hasNew: recentSessions.length > 0,
+        });
+      }
     }
 
     return json(res, 404, { error: 'Not found' });

@@ -60,25 +60,32 @@ async function loadConfigAsync() {
 async function restoreSessionsFromDisk(config) {
   let restored = 0;
   for (const agentId of Object.keys(config.agents)) {
-    const sessionDir = getSessionDir(agentId);
-    try {
-      const files = await fsp.readdir(sessionDir);
-      for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-        try {
-          const chatId = path.basename(file, '.json');
-          const key = getSessionKey(agentId, chatId);
-          if (!sessions.has(key)) {
-            const data = JSON.parse(await fsp.readFile(path.join(sessionDir, file), 'utf-8'));
-            sessions.set(key, data);
-            restored++;
-            // Populate agentChatIds so session counts are accurate after restore
-            if (!agentChatIds.has(agentId)) agentChatIds.set(agentId, new Set());
-            agentChatIds.get(agentId).add(chatId);
-          }
-        } catch {}
-      }
-    } catch {} // sessionDir may not exist
+    // Check multiple directories for session files
+    const sessionDirs = [
+      getSessionDir(agentId),                                              // tamerclaw user dir
+      path.join('/root/claude-agents/agents', agentId, 'sessions'),        // live system agent dir
+      path.join('/root/claude-agents/user/agents', agentId, 'sessions'),   // live system user/agents dir
+    ];
+    for (const sessionDir of sessionDirs) {
+      try {
+        const files = await fsp.readdir(sessionDir);
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue;
+          try {
+            const chatId = path.basename(file, '.json');
+            const key = getSessionKey(agentId, chatId);
+            if (!sessions.has(key)) {
+              const data = JSON.parse(await fsp.readFile(path.join(sessionDir, file), 'utf-8'));
+              sessions.set(key, data);
+              restored++;
+              // Populate agentChatIds so session counts are accurate after restore
+              if (!agentChatIds.has(agentId)) agentChatIds.set(agentId, new Set());
+              agentChatIds.get(agentId).add(chatId);
+            }
+          } catch {}
+        }
+      } catch {} // sessionDir may not exist
+    }
   }
   if (restored > 0) console.log(`[sessions] Restored ${restored} sessions from disk`);
 }
@@ -176,10 +183,17 @@ async function saveSessionAsync(agentId, chatId, data) {
 }
 
 function loadSession(agentId, chatId) {
-  const filePath = path.join(getSessionDir(agentId), `${chatId}.json`);
-  if (fs.existsSync(filePath)) {
-    try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
-    catch { return null; }
+  // Check multiple session directories
+  const candidates = [
+    path.join(getSessionDir(agentId), `${chatId}.json`),
+    path.join('/root/claude-agents/agents', agentId, 'sessions', `${chatId}.json`),
+    path.join('/root/claude-agents/user/agents', agentId, 'sessions', `${chatId}.json`),
+  ];
+  for (const filePath of candidates) {
+    if (fs.existsSync(filePath)) {
+      try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+      catch { continue; }
+    }
   }
   return null;
 }
@@ -581,9 +595,74 @@ async function sendAgentToAgent(fromAgent, toAgent, message) {
   return callClaude(toAgent, chatId, taggedMessage);
 }
 
-async function sendAgentMessage(agentId, message, chatId = null) {
+async function sendAgentMessage(agentId, message, chatId = null, mediaPath = null) {
   chatId = chatId || `api:${Date.now()}`;
-  return callClaude(agentId, chatId, message);
+  const response = await callClaude(agentId, chatId, message, mediaPath);
+
+  // ── Track session history & persist to disk (same as Telegram path) ──
+  try {
+    const key = getSessionKey(agentId, chatId);
+    if (!sessions.has(key)) {
+      sessions.set(key, { history: [], lastActivity: new Date().toISOString() });
+    }
+    // Track this chatId for the agent (so getAgentSessions finds it)
+    if (!agentChatIds.has(agentId)) agentChatIds.set(agentId, new Set());
+    agentChatIds.get(agentId).add(chatId);
+
+    const sess = sessions.get(key);
+    const now = new Date().toISOString();
+    sess.history.push({ role: 'user', content: message, timestamp: now });
+    sess.history.push({ role: 'assistant', content: response, timestamp: now });
+    sess.lastActivity = now;
+    if (sess.history.length > 100) {
+      sess.history = sess.history.slice(-100);
+    }
+    saveSessionAsync(agentId, chatId, sess).catch(e =>
+      console.error(`[${agentId}] API session save failed:`, e.message)
+    );
+  } catch (sessErr) {
+    console.error(`[${agentId}] API session tracking error:`, sessErr.message);
+  }
+
+  // ── Relay MEDIA: tags to Telegram (so images arrive even when sent via API/app) ──
+  try {
+    const mediaRegex = /MEDIA:(\.\/[^\s\n]+|\/[^\s\n]+)/g;
+    const mediaMatches = [...(response || '').matchAll(mediaRegex)];
+    if (mediaMatches.length > 0) {
+      // Find a bot to send with: prefer the agent's own bot, fall back to any bot
+      const bot = bots.get(agentId) || bots.values().next().value;
+      const config = loadConfig();
+      const ownerChatId = config.owner?.telegramChatId || '5270157750';
+      if (bot) {
+        for (const match of mediaMatches) {
+          let filePath = match[1];
+          if (fs.existsSync(filePath)) {
+            const ext = path.extname(filePath).toLowerCase();
+            try {
+              if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+                await bot.sendPhoto(ownerChatId, filePath, {
+                  caption: `📎 From ${agentId}: ${path.basename(filePath)}`
+                });
+              } else if (['.mp4', '.mov', '.avi', '.webm'].includes(ext)) {
+                await bot.sendVideo(ownerChatId, filePath);
+              } else {
+                await bot.sendDocument(ownerChatId, filePath);
+              }
+              console.log(`[${agentId}] Relayed media to Telegram: ${filePath}`);
+            } catch (err) {
+              console.error(`[${agentId}] Failed to relay media to Telegram: ${err.message}`);
+            }
+          } else {
+            console.error(`[${agentId}] Media relay: file not found: ${filePath}`);
+          }
+        }
+      }
+    }
+  } catch (relayErr) {
+    console.error(`[${agentId}] Media relay error:`, relayErr.message);
+  }
+
+  return response;
 }
 
 // ── Subagent Spawning ──────────────────────────────────────────────────────
@@ -645,6 +724,27 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
     try {
       const response = await callClaude(agentId, chatId, combined, media, msgTraceId);
       await sendLongMessage(bot, chatId, response);
+
+      // ── Track session history & persist to disk ──
+      try {
+        if (!sessions.has(key)) {
+          sessions.set(key, { history: [], lastActivity: new Date().toISOString() });
+        }
+        const sess = sessions.get(key);
+        const now = new Date().toISOString();
+        sess.history.push({ role: 'user', content: combined, timestamp: now });
+        sess.history.push({ role: 'assistant', content: response, timestamp: now });
+        sess.lastActivity = now;
+        // Keep max 100 messages per session to avoid unbounded growth
+        if (sess.history.length > 100) {
+          sess.history = sess.history.slice(-100);
+        }
+        saveSessionAsync(agentId, chatId, sess).catch(e =>
+          console.error(`[${agentId}] Session save failed:`, e.message)
+        );
+      } catch (sessErr) {
+        console.error(`[${agentId}] Session tracking error:`, sessErr.message);
+      }
     } catch (err) {
       console.error(`[${agentId}] Error:`, err.message);
       await bot.sendMessage(chatId, `⚠️ Error: ${err.message.slice(0, 200)}`);
@@ -1052,6 +1152,30 @@ const bridgeInterface = {
   sendAgentMessage,
   sendAgentToAgent,
   spawnSubagent,
+  stopAgent: (agentId, chatId) => {
+    // Stop active Claude CLI process for this agent+chat
+    if (chatId) {
+      const sessionKey = getSessionKey(agentId, chatId);
+      const proc = activeCalls.get(sessionKey);
+      if (proc) {
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+        activeCalls.delete(sessionKey);
+        return { stopped: true, chatId };
+      }
+    }
+    // If no chatId, stop ALL active calls for this agent
+    let stopped = 0;
+    for (const [key, proc] of activeCalls.entries()) {
+      if (key.startsWith(`${agentId}:`)) {
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+        activeCalls.delete(key);
+        stopped++;
+      }
+    }
+    return { stopped: stopped > 0, count: stopped };
+  },
   enqueueDelivery: enqueue,
   getDeliveryQueue: getPending,
   getActiveBotCount: () => bots.size,
@@ -1082,15 +1206,21 @@ const bridgeInterface = {
         });
       }
     }
-    // Also check disk sessions not in memory
-    try {
-      const sessionDir = getSessionDir(agentId);
-      if (fs.existsSync(sessionDir)) {
+    // Also check disk sessions not in memory — scan multiple directories
+    const seenChatIds = new Set([...chatIds].map(String));
+    const sessionDirs = [
+      getSessionDir(agentId),                                              // tamerclaw user dir
+      path.join('/root/claude-agents/agents', agentId, 'sessions'),        // live system agent dir
+      path.join('/root/claude-agents/user/agents', agentId, 'sessions'),   // live system user/agents dir
+    ];
+    for (const sessionDir of sessionDirs) {
+      try {
+        if (!fs.existsSync(sessionDir)) continue;
         const files = fs.readdirSync(sessionDir);
         for (const file of files) {
           if (!file.endsWith('.json')) continue;
           const chatId = path.basename(file, '.json');
-          if (chatIds.has(chatId) || chatIds.has(Number(chatId))) continue;
+          if (seenChatIds.has(String(chatId))) continue;
           try {
             const data = JSON.parse(fs.readFileSync(path.join(sessionDir, file), 'utf-8'));
             const history = data.history || [];
@@ -1104,10 +1234,11 @@ const bridgeInterface = {
               summary: lastMsg ? (lastMsg.content || lastMsg.text || '').substring(0, 120) : '',
               preview: firstMsg ? (firstMsg.content || firstMsg.text || '').substring(0, 80) : '',
             });
+            seenChatIds.add(String(chatId));
           } catch {}
         }
-      }
-    } catch {}
+      } catch {}
+    }
     // Sort by lastActivity descending
     result.sort((a, b) => {
       const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
