@@ -525,65 +525,156 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
   const promptFile = path.join(tmpDir, `claude-agent-${agentId}-prompt.txt`);
   await fsp.writeFile(promptFile, userMessage);
 
-  return new Promise((resolve, reject) => {
-
-    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
-    const args = [
-      '-p', userMessage,
-      '--output-format', 'text',
-      '--max-turns', '200',
-      '--model', modelFlag,
-      '--allowedTools', tools,
-      '--append-system-prompt', systemPrompt
-    ];
-
-    // Inherit full environment but remove CLAUDE* vars that cause nesting detection
-    const env = { ...process.env };
-    for (const key of Object.keys(env)) {
-      if (key.startsWith('CLAUDE') || key === 'CLAUDECODE') {
-        delete env[key];
+  // ── Helper: extract text from stream-json events ──
+  function extractText(events) {
+    const texts = [];
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (ev.type === 'result' && ev.result) {
+        // result event contains the final assistant message
+        const content = Array.isArray(ev.result) ? ev.result : (ev.result.content || []);
+        for (const block of content) {
+          if (block.type === 'text' && block.text) texts.push(block.text);
+        }
+        if (texts.length) return texts.join('\n\n');
+      }
+      if (ev.type === 'assistant' && ev.message?.content) {
+        for (const block of ev.message.content) {
+          if (block.type === 'text' && block.text) texts.push(block.text);
+        }
       }
     }
-    // Ensure HOME is set for OAuth credential lookup
+    return texts.length ? texts.join('\n\n') : null;
+  }
+
+  function extractStopReason(events) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].type === 'result' && events[i].stop_reason) return events[i].stop_reason;
+    }
+    return null;
+  }
+
+  function extractSessionId(events) {
+    for (const ev of events) {
+      if (ev.session_id) return ev.session_id;
+    }
+    return null;
+  }
+
+  // ── Spawn Claude CLI with stream-json for proper stop_reason detection ──
+  function spawnClaude(promptText, extraArgs = []) {
+    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
+    const args = [
+      '-p', promptText,
+      '--output-format', 'stream-json',
+      '--max-turns', '500',
+      '--model', modelFlag,
+      '--allowedTools', tools,
+      '--append-system-prompt', systemPrompt,
+      ...extraArgs
+    ];
+
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('CLAUDE') || key === 'CLAUDECODE') delete env[key];
+    }
     env.HOME = process.env.HOME || os.homedir();
 
-    const proc = spawn('claude', args, { cwd, env });
+    return spawn('claude', args, { cwd, env });
+  }
 
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      console.error(`[${agentId}] Timeout after 300s — killing`);
-      proc.kill('SIGTERM');
-    }, 300000); // 5 min timeout
+  // ── Run a single Claude call and parse stream-json ──
+  function runClaude(promptText, extraArgs = []) {
+    return new Promise((resolveRun, rejectRun) => {
+      const proc = spawnClaude(promptText, extraArgs);
+      let rawStdout = '';
+      let stderr = '';
+      const parsedEvents = [];
+      let lineBuffer = '';
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      const timer = setTimeout(() => {
+        console.error(`[${agentId}] Timeout after 600s — killing`);
+        proc.kill('SIGTERM');
+      }, 600000); // 10 min timeout
 
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      activeCalls.delete(sessionKey);
+      proc.stdout.on('data', (data) => {
+        const chunk = data.toString();
+        rawStdout += chunk;
+        lineBuffer += chunk;
+        const lines = lineBuffer.split('\n');
+        lineBuffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try { parsedEvents.push(JSON.parse(line)); } catch {}
+        }
+      });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
-      if (code === 0 && stdout.trim()) {
-        const response = stdout.trim();
-        log.log(`✅ Response: ${response.length} chars`);
-        appendToMemoryAsync(agentId, `Chat ${chatId}: ${message.slice(0, 100)}... → responded`).catch(() => {});
-        resolve(response);
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        // Parse any remaining buffered line
+        if (lineBuffer.trim()) {
+          try { parsedEvents.push(JSON.parse(lineBuffer)); } catch {}
+        }
+        resolveRun({ code, rawStdout, stderr, parsedEvents });
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        rejectRun(err);
+      });
+
+      activeCalls.set(sessionKey, proc);
+    });
+  }
+
+  // ── Main execution with auto-continue on max_turns ──
+  try {
+    let result = await runClaude(userMessage);
+    let response = extractText(result.parsedEvents);
+    if (!response && result.rawStdout.trim()) response = result.rawStdout.trim();
+
+    // Detect max_turns — either from stream-json stop_reason or from error text
+    const stopReason = extractStopReason(result.parsedEvents);
+    const hitMaxTurns = stopReason === 'max_turns' ||
+      (result.rawStdout || '').includes('Reached max turns') ||
+      (result.stderr || '').includes('Reached max turns');
+
+    if (result.code === 0 && hitMaxTurns) {
+      const sessionId = extractSessionId(result.parsedEvents);
+      if (sessionId) {
+        log.log(`[${agentId}] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
+        const contResult = await runClaude('Continue where you left off. Complete the task.', ['--resume', sessionId]);
+        const contResponse = extractText(contResult.parsedEvents);
+        if (contResult.code === 0 && contResponse) {
+          log.log(`✅ Continuation: ${contResponse.length} chars`);
+          appendToMemoryAsync(agentId, `Chat ${chatId}: ${message.slice(0, 100)}... → responded (continued)`).catch(() => {});
+          activeCalls.delete(sessionKey);
+          return contResponse;
+        }
+        // Fall through to original response if continuation failed
+        if (contResponse) response = contResponse;
       } else {
-        const errMsg = stderr.trim() || `Claude exited with code ${code}`;
-        console.error(`[${agentId}] Error (code ${code}): ${errMsg.slice(0, 500)}`);
-        reject(new Error(errMsg.slice(0, 200)));
+        log.log(`[${agentId}] Hit max_turns but no session_id — returning partial response`);
       }
-    });
+    }
 
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      activeCalls.delete(sessionKey);
-      console.error(`[${agentId}] Spawn error:`, err.message);
-      reject(err);
-    });
+    activeCalls.delete(sessionKey);
 
-    activeCalls.set(sessionKey, proc);
-  });
+    if (result.code === 0 && response) {
+      log.log(`✅ Response: ${response.length} chars`);
+      appendToMemoryAsync(agentId, `Chat ${chatId}: ${message.slice(0, 100)}... → responded`).catch(() => {});
+      return response;
+    } else {
+      const errMsg = result.stderr.trim() || `Claude exited with code ${result.code}`;
+      console.error(`[${agentId}] Error (code ${result.code}): ${errMsg.slice(0, 500)}`);
+      throw new Error(errMsg.slice(0, 200));
+    }
+  } catch (err) {
+    activeCalls.delete(sessionKey);
+    console.error(`[${agentId}] Spawn error:`, err.message);
+    throw err;
+  }
 }
 
 // ── Agent-to-Agent Communication ───────────────────────────────────────────

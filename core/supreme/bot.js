@@ -335,7 +335,15 @@ function callClaude(message, chatId, mediaPath = null) {
 
     const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
     const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
-    const cmd = `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT ${CLAUDE_BIN} -p "$(cat ${promptFile})" --verbose --output-format stream-json --max-turns 200 --model opus --allowedTools "${tools}" --system-prompt "$(cat ${sysFile})"`;
+    const args = [
+      '-p', userMessage,
+      '--verbose',
+      '--output-format', 'stream-json',
+      '--max-turns', '500',
+      '--model', 'opus',
+      '--allowedTools', tools,
+      '--system-prompt', systemPrompt
+    ];
 
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
@@ -343,7 +351,7 @@ function callClaude(message, chatId, mediaPath = null) {
     }
     env.HOME = process.env.HOME || os.homedir();
 
-    const proc = spawn('bash', ['-c', cmd], { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(CLAUDE_BIN, args, { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
     activeProcess = proc;
     stopRequested = false;
 
@@ -675,7 +683,11 @@ function callClaude(message, chatId, mediaPath = null) {
 
       // ── Auto-continue on max_turns ──
       const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
-      if (code === 0 && stopReason === 'max_turns') {
+      // Detect max_turns from stream-json OR from raw text fallback
+      const hitMaxTurns = (code === 0 && stopReason === 'max_turns') ||
+        rawStdout.includes('Reached max turns') || stderr.includes('Reached max turns');
+
+      if (hitMaxTurns) {
         console.log('[supreme] Hit max_turns — auto-continuing...');
         if (chatId) {
           bot.sendMessage(chatId, '👑 Supreme hit turn limit — auto-continuing...').catch(() => {});
@@ -686,10 +698,17 @@ function callClaude(message, chatId, mediaPath = null) {
           console.error('[supreme] No session_id found in events — cannot auto-continue');
           // Fall through to normal result handling
         } else {
-          const contPromptFile = path.join(tmpDir, 'claude-supreme-cont-prompt.txt');
-          fs.writeFileSync(contPromptFile, 'Continue where you left off. Complete the task.');
-          const contCmd = `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT ${CLAUDE_BIN} -p "$(cat ${contPromptFile})" --verbose --output-format stream-json --max-turns 200 --model opus --allowedTools "${tools}" --resume ${sessionId} --append-system-prompt "$(cat ${sysFile})"`;
-          const contProc = spawn('bash', ['-c', contCmd], { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
+          const contArgs = [
+            '-p', 'Continue where you left off. Complete the task.',
+            '--verbose',
+            '--output-format', 'stream-json',
+            '--max-turns', '500',
+            '--model', 'opus',
+            '--allowedTools', tools,
+            '--resume', sessionId,
+            '--append-system-prompt', systemPrompt
+          ];
+          const contProc = spawn(CLAUDE_BIN, contArgs, { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
         activeProcess = contProc;
 
         let contRaw = '';

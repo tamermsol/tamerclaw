@@ -751,7 +751,7 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
       '-p', userMessage,
       '--verbose',
       '--output-format', 'stream-json',
-      '--max-turns', '200',
+      '--max-turns', '500',
       '--model', model,
       '--allowedTools', tools
     ];
@@ -974,7 +974,10 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
 
       // ── Auto-continue on max_turns ──
       const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
-      if (code === 0 && stopReason === 'max_turns') {
+      const hitMaxTurns = stopReason === 'max_turns' ||
+        (rawStdout || '').includes('Reached max turns') ||
+        (stderr || '').includes('Reached max turns');
+      if (code === 0 && hitMaxTurns) {
         const sessionId = existingSessionId || agentSessions[agentId]?.sessionId;
         if (sessionId) {
           console.log(`[${agentId}] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
@@ -986,7 +989,7 @@ async function callClaudeCLI(message, agentId, chatId, modelConfig, mediaPath = 
             '-p', 'Continue where you left off. Complete the task.',
             '--verbose',
             '--output-format', 'stream-json',
-            '--max-turns', '200',
+            '--max-turns', '500',
             '--model', model,
             '--allowedTools', tools,
             '--resume', sessionId,
