@@ -979,7 +979,7 @@ async function downloadMedia(bot, fileId, agentId) {
 function startBot(agentId, agentConfig, config) {
   // Skip agents that have standalone bot services (they poll their own token)
   const standaloneAgents = config.standaloneAgents || [];
-  if (standaloneAgents.includes(agentId)) {
+  if (standaloneAgents.includes(agentId) || agentConfig.standalone === true) {
     console.log(`[${agentId}] Standalone service — skipping (has own systemd service)`);
     return null;
   }
