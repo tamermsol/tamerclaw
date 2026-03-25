@@ -531,7 +531,7 @@ USEREOF
     fi
 
     # Store workspace path (the original location)
-    agents_json+="\"$agent_name\":{\"botToken\":\"$token\",\"workspace\":\"$agent_path\",\"identity\":\"$SCRIPT_DIR/user/agents/$agent_name/IDENTITY.md\"},"
+    agents_json+="\"$agent_name\":{\"botToken\":\"$token\",\"model\":\"dynamic\",\"modelRouting\":{\"complex\":\"claude-opus-4-6\",\"default\":\"claude-sonnet-4-6\",\"complexPatterns\":[\"debug\",\"fix\",\"refactor\",\"implement\",\"create\",\"design\",\"architect\",\"plan\",\"analyze\",\"review\"]},\"workspace\":\"$agent_path\",\"identity\":\"$SCRIPT_DIR/user/agents/$agent_name/IDENTITY.md\"},"
   done
 
   # Add supreme agent
@@ -607,7 +607,12 @@ SUPTOOLSEOF
         defaultProvider: 'anthropic'
       },
       defaults: {
-        model: 'claude-sonnet-4-6',
+        model: 'dynamic',
+        modelRouting: {
+          complex: 'claude-opus-4-6',
+          default: 'claude-sonnet-4-6',
+          complexPatterns: ['debug', 'fix', 'refactor', 'implement', 'create', 'design', 'architect', 'plan', 'analyze', 'review']
+        },
         fallbackModels: ['claude-sonnet-4-6'],
         maxTokens: 16384,
         contextTokens: 131072,
@@ -1440,6 +1445,12 @@ EOF
     }
     c.agents['$agent_id'] = {
       botToken: '',
+      model: 'dynamic',
+      modelRouting: {
+        complex: 'claude-opus-4-6',
+        default: 'claude-sonnet-4-6',
+        complexPatterns: ['debug', 'fix', 'refactor', 'implement', 'create', 'design', 'architect', 'plan', 'analyze', 'review']
+      },
       workspace: '${agent_path:-}',
       identity: '$SCRIPT_DIR/user/agents/$agent_id/IDENTITY.md'
     };

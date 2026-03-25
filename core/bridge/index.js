@@ -214,12 +214,13 @@ function resolveModelConfig(agentId, config, messageText) {
   let rawModel = agent.model || config.defaults?.model || 'claude-sonnet-4-6';
 
   // Dynamic model routing: pick model based on message complexity
-  if (rawModel === 'dynamic' && agent.modelRouting) {
-    const routing = agent.modelRouting;
+  // Check agent-level routing first, then fall back to defaults
+  const routing = (rawModel === 'dynamic') && (agent.modelRouting || config.defaults?.modelRouting);
+  if (routing) {
     const msg = (messageText || '').toLowerCase();
     const patterns = routing.complexPatterns || [];
     const isComplex = patterns.some(p => msg.includes(p)) || msg.length > 500;
-    rawModel = isComplex ? routing.complex : (routing.default || routing.simple);
+    rawModel = isComplex ? routing.complex : (routing.default || routing.simple || 'claude-sonnet-4-6');
   }
 
   let provider = null;
@@ -1084,7 +1085,7 @@ function startBot(agentId, agentConfig, config) {
         const botCount = bots.size;
         const sessionCount = sessions.size;
         const proxyMode = getProxyMode(targetAgent);
-        const proxyInfo = proxyMode === 2 ? 'Dynamic (haiku/opus)' : 'Original';
+        const proxyInfo = proxyMode === 2 ? 'Dynamic (sonnet/opus)' : 'Original';
         await bot.sendMessage(msg.chat.id,
           `Agent: *${targetAgent}*\nProxy: ${proxyInfo}\nUptime: ${uptime}s\nActive bots: ${botCount}\nSessions: ${sessionCount}`,
           { parse_mode: 'Markdown' }
@@ -1106,7 +1107,7 @@ function startBot(agentId, agentConfig, config) {
         } else if (arg === '2') {
           setProxyMode(targetAgent, 2);
           await bot.sendMessage(msg.chat.id,
-            `*${targetAgent}* → dynamic routing active\n\n- Simple messages → haiku (saves rate limit)\n- Complex messages → opus\n\nUse /proxy 1 to switch back.`,
+            `*${targetAgent}* → dynamic routing active\n\n- Simple messages → sonnet (execution)\n- Complex messages → opus (planning)\n\nUse /proxy 1 to switch back.`,
             { parse_mode: 'Markdown' }
           );
         } else {
@@ -1116,7 +1117,7 @@ function startBot(agentId, agentConfig, config) {
           if (proxied.length > 0) {
             statusMsg += `\n\nAgents on dynamic routing: ${proxied.join(', ')}`;
           }
-          statusMsg += `\n\nCommands:\n- /proxy 1 — original model\n- /proxy 2 — dynamic (haiku/opus)`;
+          statusMsg += `\n\nCommands:\n- /proxy 1 — original model\n- /proxy 2 — dynamic (sonnet/opus)`;
           await bot.sendMessage(msg.chat.id, statusMsg, { parse_mode: 'Markdown' });
         }
         return;
