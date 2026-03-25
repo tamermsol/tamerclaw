@@ -816,29 +816,22 @@ cmd_update() {
     exit 1
   fi
 
-  # Stash any local changes to core
-  local stashed=0
-  if ! git -C "$SCRIPT_DIR" diff --quiet -- core/; then
-    warn "Local changes in core/ detected. Stashing..."
-    git -C "$SCRIPT_DIR" stash push -m "tamerclaw-update-$(date +%s)" -- core/ 2>/dev/null
-    stashed=1
-  fi
-
   # Record pre-pull HEAD for diffing
   local old_head
   old_head=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "")
   local old_version="$VERSION"
 
-  # Pull latest
-  local pull_output
-  pull_output=$(git -C "$SCRIPT_DIR" pull --ff-only origin main 2>&1) || {
-    err "Pull failed. You may have diverged from upstream."
-    echo "    Try: cd $SCRIPT_DIR && git pull --rebase origin main"
-    [ "$stashed" -eq 1 ] && git -C "$SCRIPT_DIR" stash pop 2>/dev/null
+  # Fetch latest from origin
+  git -C "$SCRIPT_DIR" fetch origin main 2>/dev/null || {
+    err "Failed to fetch updates. Check your internet connection."
     exit 1
   }
 
-  if echo "$pull_output" | grep -q "Already up to date"; then
+  # Check if already up to date
+  local remote_head
+  remote_head=$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null || echo "")
+
+  if [ "$old_head" = "$remote_head" ]; then
     # Even if code is up to date, check if services need repair
     local svc_ok=true
     for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
@@ -853,6 +846,13 @@ cmd_update() {
     fi
     warn "Code is up to date but services need repair — regenerating..."
   fi
+
+  # Force-update local to match upstream (safe: user data is in gitignored user/)
+  info "Applying updates..."
+  git -C "$SCRIPT_DIR" reset --hard origin/main 2>/dev/null || {
+    err "Failed to apply updates."
+    exit 1
+  }
 
   local new_version
   new_version=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/version.json','utf-8')).version)" 2>/dev/null || echo "unknown")

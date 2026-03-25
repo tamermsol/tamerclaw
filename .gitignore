@@ -27,6 +27,13 @@ core/supreme/processing.json
 core/supreme/health.json
 core/supreme/bot.lock
 
+# Runtime logs
+*.log
+bridge.log
+
+# Fix/migration scripts (generated locally)
+fix-*.sh
+
 # OS
 .DS_Store
 *.swp
