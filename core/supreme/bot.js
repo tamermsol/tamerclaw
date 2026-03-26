@@ -824,8 +824,8 @@ function callClaude(message, chatId, mediaPath = null) {
         if (chatId) {
           bot.sendMessage(chatId, '⏳ Retrying with fallback mode...').catch(() => {});
         }
-        const textCmd = cmd.replace('--output-format stream-json', '--output-format text');
-        const retryProc = spawn('bash', ['-c', textCmd], { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        const retryArgs = args.map(a => a === 'stream-json' ? 'text' : a);
+        const retryProc = spawn(CLAUDE_BIN, retryArgs, { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
         activeProcess = retryProc;
 
         let retryOut = '';
