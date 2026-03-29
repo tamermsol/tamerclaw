@@ -30,6 +30,13 @@ export const paths = {
   tmp: path.join(TAMERCLAW_HOME, 'user', 'tmp'),
   deliveryQueue: path.join(TAMERCLAW_HOME, 'user', 'delivery-queue'),
 
+  // Meetings — core code + runtime data under user/
+  meetings: path.join(TAMERCLAW_HOME, 'core', 'meetings'),
+  meetingsRuntime: path.join(TAMERCLAW_HOME, 'user', 'meetings'),
+  meetingsActive: path.join(TAMERCLAW_HOME, 'user', 'meetings', 'active'),
+  meetingsInbox: path.join(TAMERCLAW_HOME, 'user', 'meetings', 'inbox'),
+  meetingsRequests: path.join(TAMERCLAW_HOME, 'user', 'meetings', 'requests'),
+
   // Runtime state — lives in user/ for workspace isolation & update safety
   proxyState: path.join(TAMERCLAW_HOME, 'user', 'proxy-state.json'),
   rateUsage: path.join(TAMERCLAW_HOME, 'user', 'rate-usage.json'),

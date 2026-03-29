@@ -125,18 +125,19 @@ async function edgeTTS(text, options = {}) {
     const audioFilters = [
       'highpass=f=80',
       'equalizer=f=6500:t=q:w=2:g=-3',          // de-ess sibilance
-      'equalizer=f=250:t=q:w=1.2:g=2.5',         // warmth
+      'equalizer=f=250:t=q:w=1.2:g=2',           // warmth
       'equalizer=f=500:t=q:w=2:g=-1.5',           // mud cut
-      'equalizer=f=3000:t=q:w=1.5:g=2',           // presence
-      'equalizer=f=8000:t=q:w=2:g=-1.5',          // harsh freq cut
-      'equalizer=f=12000:t=q:w=2:g=-2',           // cut high ringing (was boost — caused whistle)
-      'lowpass=f=13000:p=1',                       // gentle rolloff above 13kHz
-      'acompressor=threshold=0.03:ratio=3:attack=5:release=100:makeup=1:knee=8',
+      'equalizer=f=3000:t=q:w=1.5:g=1.5',         // presence (reduced from +2)
+      'equalizer=f=8000:t=q:w=2:g=-3',            // harsh freq cut (stronger)
+      'equalizer=f=10000:t=q:w=1.5:g=-4',         // kill whistle zone 10kHz
+      'equalizer=f=12000:t=q:w=2:g=-5',           // aggressive cut at 12kHz — whistle killer
+      'lowpass=f=11000:p=2',                       // steep rolloff above 11kHz (2-pole = 12dB/oct)
+      'acompressor=threshold=0.05:ratio=2.5:attack=10:release=150:makeup=1:knee=10',
       'alimiter=limit=0.93:level=false',
       'loudnorm=I=-16:LRA=9:TP=-1.5',
     ].join(',');
     await execAsync(
-      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 96k -vbr on -compression_level 10 -application voip "${oggPath}"`,
+      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 96k -vbr on -compression_level 10 -application audio "${oggPath}"`,
       { timeout: 30_000 }
     );
 

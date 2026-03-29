@@ -193,7 +193,7 @@ export function resolveModelWithRateCheck(requestedModel, options = {}) {
 
     if (!candidateStats?.nearLimit) {
       const reason = `${normalizedRequested} at ${Math.round(requestedStats.pct * 100)}% capacity (${requestedStats.count}/${requestedStats.max}) → downshifted to ${candidate}`;
-      console.log(`[rate-tracker] Proactive downshift: ${reason}`);
+      console.log(`[rate-tracker] ⚡ Proactive downshift: ${reason}`);
       return {
         model: candidate,
         downshifted: true,
@@ -206,7 +206,7 @@ export function resolveModelWithRateCheck(requestedModel, options = {}) {
   // All models near limit — use the lowest tier anyway (haiku has highest limits)
   const lastModel = MODEL_CHAIN[MODEL_CHAIN.length - 1];
   const reason = `All models near limit — using ${lastModel} as last resort`;
-  console.log(`[rate-tracker] ${reason}`);
+  console.log(`[rate-tracker] ⚠️ ${reason}`);
   return {
     model: lastModel,
     downshifted: normalizedRequested !== lastModel,
@@ -272,11 +272,11 @@ export function resetUsage() {
  */
 export function formatStatus() {
   const stats = getUsageStats();
-  const lines = ['Rate Limit Status:'];
+  const lines = ['📊 Rate Limit Status:'];
   for (const model of MODEL_CHAIN) {
     const s = stats[model];
-    const indicator = s.atLimit ? '[RED]' : s.nearLimit ? '[YEL]' : '[GRN]';
-    lines.push(`${indicator} ${model}: ${s.count}/${s.max} (${Math.round(s.pct * 100)}%) in ${s.windowMs / 1000}s window`);
+    const bar = s.nearLimit ? '🟡' : s.atLimit ? '🔴' : '🟢';
+    lines.push(`${bar} ${model}: ${s.count}/${s.max} (${Math.round(s.pct * 100)}%) in ${s.windowMs / 1000}s window`);
   }
   return lines.join('\n');
 }

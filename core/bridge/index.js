@@ -41,6 +41,8 @@ const sessions = new Map();       // `${agentId}:${chatId}` → { history, lastA
 const activeCalls = new Map();    // `${agentId}:${chatId}` → child process
 const messageBuffers = new Map(); // `${agentId}:${chatId}` → { messages[], timer }
 const agentChatIds = new Map();   // agentId → Set of known chatIds
+const approvedTools = new Map();  // agentId → Set of approved tool names
+const pendingPermissions = new Map(); // `perm:${agentId}:${chatId}:${nonce}` → { toolName, message, mediaPath, bot }
 
 // ── Config ─────────────────────────────────────────────────────────────────
 function loadConfig() {
@@ -214,13 +216,12 @@ function resolveModelConfig(agentId, config, messageText) {
   let rawModel = agent.model || config.defaults?.model || 'claude-sonnet-4-6';
 
   // Dynamic model routing: pick model based on message complexity
-  // Check agent-level routing first, then fall back to defaults
-  const routing = (rawModel === 'dynamic') && (agent.modelRouting || config.defaults?.modelRouting);
-  if (routing) {
+  if (rawModel === 'dynamic' && agent.modelRouting) {
+    const routing = agent.modelRouting;
     const msg = (messageText || '').toLowerCase();
     const patterns = routing.complexPatterns || [];
     const isComplex = patterns.some(p => msg.includes(p)) || msg.length > 500;
-    rawModel = isComplex ? routing.complex : (routing.default || routing.simple || 'claude-sonnet-4-6');
+    rawModel = isComplex ? routing.complex : (routing.default || routing.simple);
   }
 
   let provider = null;
@@ -374,7 +375,7 @@ async function buildSystemPromptAsync(agentId) {
 }
 
 // ── Claude Code Execution (Full CLI — like talking to Claude Code) ─────────
-async function callClaude(agentId, chatId, message, mediaPath = null, traceId = null) {
+async function callClaude(agentId, chatId, message, mediaPath = null, traceId = null, streamCtx = null) {
   const trace = createTrace('bridge', 'callClaude', traceId);
   const log = tracedLogger(trace);
   const config = await loadConfigAsync();
@@ -385,8 +386,8 @@ async function callClaude(agentId, chatId, message, mediaPath = null, traceId = 
     return callOpenAICompatible(agentId, chatId, message, mc, config, mediaPath, trace);
   }
 
-  // Default: Claude CLI path
-  return callClaudeCLI(agentId, chatId, message, mc, config, mediaPath, trace);
+  // Default: Claude CLI path (with streaming support)
+  return callClaudeCLI(agentId, chatId, message, mc, config, mediaPath, trace, streamCtx);
 }
 
 /**
@@ -410,12 +411,23 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
 
   log.log(`Calling ${mc.provider}/${mc.modelId} for chat ${chatId}...`);
 
+  // Build messages array with conversation history for proper multi-turn context
+  const messagesArray = [{ role: 'system', content: systemPrompt }];
+  const session = sessions.get(sessionKey);
+  if (session && session.history && session.history.length > 0) {
+    const recent = session.history.slice(-20);
+    for (const msg of recent) {
+      const content = msg.content.length > 500
+        ? msg.content.slice(0, 500) + '... [truncated]'
+        : msg.content;
+      messagesArray.push({ role: msg.role, content });
+    }
+  }
+  messagesArray.push({ role: 'user', content: userMessage });
+
   const payload = {
     model: mc.modelId,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage }
-    ],
+    messages: messagesArray,
     max_tokens: mc.maxTokens,
     temperature: 0.7,
     stream: false
@@ -487,10 +499,107 @@ async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaP
   });
 }
 
+// ── Permission Management ──────────────────────────────────────────────────
+const APPROVED_TOOLS_DIR = path.join(paths.shared, 'approved-tools');
+
+function getApprovedTools(agentId) {
+  if (!approvedTools.has(agentId)) {
+    // Load from disk if persisted
+    try {
+      const filePath = path.join(APPROVED_TOOLS_DIR, `${agentId}.json`);
+      if (fs.existsSync(filePath)) {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        approvedTools.set(agentId, new Set(data.tools || []));
+      } else {
+        approvedTools.set(agentId, new Set());
+      }
+    } catch {
+      approvedTools.set(agentId, new Set());
+    }
+  }
+  return approvedTools.get(agentId);
+}
+
+async function approveToolForAgent(agentId, toolName) {
+  const tools = getApprovedTools(agentId);
+  tools.add(toolName);
+  approvedTools.set(agentId, tools);
+  // Persist to disk
+  await ensureDir(APPROVED_TOOLS_DIR);
+  const filePath = path.join(APPROVED_TOOLS_DIR, `${agentId}.json`);
+  await fsp.writeFile(filePath, JSON.stringify({ tools: [...tools], updatedAt: new Date().toISOString() }, null, 2));
+}
+
+/**
+ * Parse permission error from stderr to extract the tool name.
+ */
+function parsePermissionError(stderr, stdout) {
+  const combined = (stderr + '\n' + stdout).toLowerCase();
+  const permPatterns = [
+    /tool[:\s]+["`']?(\w+)["`']?\s+requires?\s+permission/i,
+    /user denied tool[:\s]+["`']?(\w+)/i,
+    /permission.*denied.*tool[:\s]+["`']?(\w+)/i,
+    /blocked on\s+(\w+)\b.*permission/i,
+    /need.*permission.*for\s+(\w+)/i,
+  ];
+
+  for (const pattern of permPatterns) {
+    const match = (stderr + '\n' + stdout).match(pattern);
+    if (match) return match[1];
+  }
+
+  const toolMentions = [
+    /I'm blocked on (\w+)/i,
+    /blocked.*?—.*?(\w+)\s+permission/i,
+    /permission prompt.*?(\w+)\s/i,
+    /waiting for.*?(\w+)\s+permission/i,
+  ];
+  for (const pattern of toolMentions) {
+    const match = stdout.match(pattern);
+    if (match) {
+      const tool = match[1];
+      const knownTools = ['WebFetch', 'WebSearch', 'Bash', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'Agent', 'NotebookEdit'];
+      const found = knownTools.find(t => t.toLowerCase() === tool.toLowerCase());
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Detect if a Claude response text indicates a permission block.
+ */
+function detectPermissionBlock(responseText) {
+  if (!responseText) return null;
+  const patterns = [
+    /I'm blocked on (\w+)\b/i,
+    /blocked on (\w+)\s*[—–-]/i,
+    /permission prompt.*?for\s+(\w+)/i,
+    /waiting for\s+(\w+)\s+permission/i,
+    /can'?t\s+(?:use|access)\s+(\w+)\s+(?:without|until).*?permission/i,
+    /(\w+)\s+(?:tool\s+)?(?:is\s+)?blocked/i,
+    /need(?:s)?\s+permission\s+(?:for|to use)\s+(\w+)/i,
+    /permission\s+(?:for|to use)\s+(\w+)\s+(?:is|was)\s+(?:denied|blocked|required)/i,
+  ];
+
+  const knownTools = ['WebFetch', 'WebSearch', 'Bash', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'Agent', 'NotebookEdit', 'TodoWrite'];
+
+  for (const pattern of patterns) {
+    const match = responseText.match(pattern);
+    if (match) {
+      const toolCandidate = match[1];
+      const found = knownTools.find(t => t.toLowerCase() === toolCandidate.toLowerCase());
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 /**
  * Call Claude via the Claude CLI (original path).
  */
-async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = null, trace = null) {
+async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = null, trace = null, streamCtx = null) {
   const sessionKey = getSessionKey(agentId, chatId);
   let modelFlag = mc.cliFlag || 'sonnet';
   const log = tracedLogger(trace || createTrace('bridge', 'claude-cli'));
@@ -509,10 +618,14 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
   const systemPromptFile = path.join(tmpDir, `claude-agent-${agentId}-system.md`);
   await fsp.writeFile(systemPromptFile, systemPrompt);
 
-  // Build the user message
+  // Build the user message with conversation context
+  const conversationContext = buildConversationContext(agentId, chatId);
   let userMessage = message;
   if (mediaPath) {
     userMessage = `[Media file at: ${mediaPath}]\n\n${message || 'User sent a media file.'}`;
+  }
+  if (conversationContext) {
+    userMessage = `${conversationContext}\n\n---\n\n# Current Message\n${userMessage}`;
   }
 
   // Use agent's legacy workspace as cwd so Claude Code has project context
@@ -562,18 +675,25 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
     return null;
   }
 
-  // ── Spawn Claude CLI with stream-json for proper stop_reason detection ──
+  // Build allowed tools
+  const agentConf = config.agents[agentId] || {};
+  const configAllowed = agentConf.allowedTools || config.defaults?.allowedTools || [];
+  const runtimeApproved = [...getApprovedTools(agentId)];
+  const allAllowed = [...new Set([...configAllowed, ...runtimeApproved])];
+
   function spawnClaude(promptText, extraArgs = []) {
-    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
     const args = [
       '-p', promptText,
+      '--verbose',
       '--output-format', 'stream-json',
       '--max-turns', '500',
       '--model', modelFlag,
-      '--allowedTools', tools,
       '--append-system-prompt', systemPrompt,
       ...extraArgs
     ];
+    if (allAllowed.length > 0) {
+      args.push('--allowedTools', ...allAllowed);
+    }
 
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
@@ -581,10 +701,39 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
     }
     env.HOME = process.env.HOME || os.homedir();
 
-    return spawn('claude', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    return spawn('claude', args, { cwd, env });
   }
 
-  // ── Run a single Claude call and parse stream-json ──
+  // ── Stream event handler for live Telegram updates ──
+  function handleStreamEvent(event) {
+    if (!streamCtx) return;
+    try {
+      // Tool use events → show progress
+      if (event.type === 'tool_use') {
+        const toolName = event.tool || event.name || (event.tool_use?.name) || 'tool';
+        const toolInput = event.input || (event.tool_use?.input) || {};
+        streamCtx.onTool(toolName, toolInput);
+      }
+      // Assistant text blocks
+      if (event.type === 'assistant' && event.message?.content) {
+        for (const block of event.message.content) {
+          if (block.type === 'tool_use') {
+            streamCtx.onTool(block.name, block.input);
+          }
+          if (block.type === 'text' && block.text) {
+            streamCtx.onText(block.text);
+          }
+        }
+      }
+      // Content block deltas (streaming text chunks)
+      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta?.text) {
+        streamCtx.onText(event.delta.text);
+      }
+    } catch (e) {
+      console.error(`[${agentId}] Stream event handler error:`, e.message);
+    }
+  }
+
   function runClaude(promptText, extraArgs = []) {
     return new Promise((resolveRun, rejectRun) => {
       const proc = spawnClaude(promptText, extraArgs);
@@ -593,10 +742,11 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
       const parsedEvents = [];
       let lineBuffer = '';
 
+      const BRIDGE_TIMEOUT_MS = 1800000; // 30 min (match standalone agents)
       const timer = setTimeout(() => {
-        console.error(`[${agentId}] Timeout after 600s — killing`);
+        console.error(`[${agentId}] Timeout after ${BRIDGE_TIMEOUT_MS / 1000}s — killing`);
         proc.kill('SIGTERM');
-      }, 600000); // 10 min timeout
+      }, BRIDGE_TIMEOUT_MS);
 
       proc.stdout.on('data', (data) => {
         const chunk = data.toString();
@@ -606,17 +756,25 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
         lineBuffer = lines.pop();
         for (const line of lines) {
           if (!line.trim()) continue;
-          try { parsedEvents.push(JSON.parse(line)); } catch {}
+          try {
+            const event = JSON.parse(line);
+            parsedEvents.push(event);
+            handleStreamEvent(event);
+          } catch {}
         }
       });
       proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timer);
-        // Parse any remaining buffered line
         if (lineBuffer.trim()) {
-          try { parsedEvents.push(JSON.parse(lineBuffer)); } catch {}
+          try {
+            const event = JSON.parse(lineBuffer);
+            parsedEvents.push(event);
+            handleStreamEvent(event);
+          } catch {}
         }
+        if (streamCtx) streamCtx.onDone();
         resolveRun({ code, rawStdout, stderr, parsedEvents });
       });
 
@@ -655,10 +813,7 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
           activeCalls.delete(sessionKey);
           return contResponse;
         }
-        // Fall through to original response if continuation failed
         if (contResponse) response = contResponse;
-      } else {
-        log.log(`[${agentId}] Hit max_turns but no session_id — returning partial response`);
       }
     }
 
@@ -793,6 +948,170 @@ async function spawnSubagent(parentAgentId, task, childModel = null) {
   }
 }
 
+// ── Live Streaming Helpers for Telegram ──────────────────────────────────
+const STREAM_MAX_MSG_LEN = 3800;
+const STREAM_MIN_UPDATE_INTERVAL = 1500; // ms between Telegram edits
+
+async function telegramEditSafe(bot, chatId, messageId, text) {
+  let safeText = text;
+  if (text.length > 4096) {
+    let cutAt = text.lastIndexOf('\n', 4066);
+    if (cutAt < 2000) cutAt = 4066;
+    safeText = text.slice(0, cutAt) + '\n\n…';
+  }
+  try {
+    await bot.editMessageText(safeText, { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' });
+    return true;
+  } catch (err) {
+    if (err.message?.includes('parse') || err.message?.includes("Can't parse")) {
+      try {
+        await bot.editMessageText(safeText, { chat_id: chatId, message_id: messageId });
+        return true;
+      } catch { return false; }
+    } else if (err.message?.includes('message is not modified')) {
+      return true;
+    } else if (err.response?.statusCode === 429) {
+      const wait = (err.response.body?.parameters?.retry_after || 2) * 1000;
+      if (wait > 10000) return false;
+      await new Promise(r => setTimeout(r, wait + 200));
+      try {
+        await bot.editMessageText(safeText, { chat_id: chatId, message_id: messageId });
+        return true;
+      } catch { return false; }
+    }
+    return false;
+  }
+}
+
+function createStreamContext(bot, chatId, agentId) {
+  const ctx = {
+    streamText: '',
+    streamMessageId: null,
+    sentMessages: [],
+    lastStreamUpdate: 0,
+    lastStreamedLength: 0,
+    streamUpdatePending: false,
+    inToolPhase: false,
+    toolCount: 0,
+    lastActivity: '',
+    progressMessageId: null,
+    lastProgressSent: 0,
+    done: false,
+
+    onTool(toolName, toolInput) {
+      const desc = {
+        'Read': `Reading ${toolInput?.file_path?.split('/').pop() || 'file'}`,
+        'Write': `Writing ${toolInput?.file_path?.split('/').pop() || 'file'}`,
+        'Edit': `Editing ${toolInput?.file_path?.split('/').pop() || 'file'}`,
+        'Bash': `Running command`,
+        'Glob': `Searching files`,
+        'Grep': `Searching content`,
+        'Agent': `Launching sub-agent`,
+        'WebSearch': `Searching web`,
+        'WebFetch': `Fetching URL`,
+      };
+      ctx.lastActivity = desc[toolName] || `${toolName}`;
+      ctx.toolCount++;
+      ctx.inToolPhase = true;
+      ctx._maybeSendToolProgress();
+    },
+
+    onText(text) {
+      if (ctx.inToolPhase && ctx.streamText.length > 0) ctx.streamText += '\n\n';
+      ctx.inToolPhase = false;
+      ctx.streamText += text;
+      ctx._scheduleStreamUpdate();
+    },
+
+    onDone() {
+      ctx.done = true;
+      // Final update with complete text
+      ctx._doStreamUpdate();
+    },
+
+    async _maybeSendToolProgress() {
+      const now = Date.now();
+      if (now - ctx.lastProgressSent < 3000) return; // Rate limit tool progress
+      ctx.lastProgressSent = now;
+
+      const statusText = `${ctx.lastActivity} (${ctx.toolCount} tools used)`;
+      try {
+        if (ctx.progressMessageId && !ctx.streamMessageId) {
+          await telegramEditSafe(bot, chatId, ctx.progressMessageId, statusText);
+        } else if (!ctx.streamMessageId && !ctx.progressMessageId) {
+          const sent = await bot.sendMessage(chatId, statusText);
+          if (sent?.message_id) ctx.progressMessageId = sent.message_id;
+        }
+      } catch {}
+    },
+
+    _scheduleStreamUpdate() {
+      if (ctx.streamUpdatePending) return;
+      const now = Date.now();
+      const timeSince = now - ctx.lastStreamUpdate;
+      const newChars = ctx.streamText.length - ctx.lastStreamedLength;
+      const delay = !ctx.streamMessageId ? (newChars >= 30 ? 0 : 500) :
+                    (timeSince >= STREAM_MIN_UPDATE_INTERVAL && newChars > 0) ? 0 :
+                    Math.max(0, STREAM_MIN_UPDATE_INTERVAL - timeSince);
+      if (delay === 0) {
+        ctx._doStreamUpdate();
+      } else {
+        ctx.streamUpdatePending = true;
+        setTimeout(() => { ctx.streamUpdatePending = false; ctx._doStreamUpdate(); }, delay);
+      }
+    },
+
+    async _doStreamUpdate() {
+      if (!ctx.streamText || ctx.streamText.length === ctx.lastStreamedLength) return;
+      try {
+        // Delete progress message when we start streaming actual text
+        if (ctx.progressMessageId && !ctx.streamMessageId) {
+          try { await bot.deleteMessage(chatId, ctx.progressMessageId); } catch {}
+          ctx.progressMessageId = null;
+        }
+
+        if (!ctx.streamMessageId) {
+          const displayText = ctx.streamText.slice(0, STREAM_MAX_MSG_LEN) + (ctx.done ? '' : ' ...');
+          const sent = await bot.sendMessage(chatId, displayText, { parse_mode: 'Markdown' }).catch(() =>
+            bot.sendMessage(chatId, displayText)
+          );
+          if (sent?.message_id) {
+            ctx.streamMessageId = sent.message_id;
+            ctx.sentMessages.push(sent.message_id);
+          }
+        } else if (ctx.streamText.length > STREAM_MAX_MSG_LEN) {
+          // Split: finalize current message, start a new one for overflow
+          let splitAt = ctx.streamText.lastIndexOf('\n\n', STREAM_MAX_MSG_LEN);
+          if (splitAt < STREAM_MAX_MSG_LEN * 0.3) splitAt = ctx.streamText.lastIndexOf('\n', STREAM_MAX_MSG_LEN);
+          if (splitAt < STREAM_MAX_MSG_LEN * 0.3) splitAt = STREAM_MAX_MSG_LEN;
+          const finalizedText = ctx.streamText.slice(0, splitAt);
+          const remainingText = ctx.streamText.slice(splitAt).trimStart();
+          await telegramEditSafe(bot, chatId, ctx.streamMessageId, finalizedText);
+          ctx.streamText = remainingText;
+          if (remainingText.length > 0) {
+            const displayText = remainingText + (ctx.done ? '' : ' ...');
+            const sent = await bot.sendMessage(chatId, displayText, { parse_mode: 'Markdown' }).catch(() =>
+              bot.sendMessage(chatId, displayText)
+            );
+            if (sent?.message_id) {
+              ctx.streamMessageId = sent.message_id;
+              ctx.sentMessages.push(sent.message_id);
+            }
+          }
+        } else {
+          const displayText = ctx.streamText + (ctx.done ? '' : ' ...');
+          await telegramEditSafe(bot, chatId, ctx.streamMessageId, displayText);
+        }
+        ctx.lastStreamedLength = ctx.streamText.length;
+        ctx.lastStreamUpdate = Date.now();
+      } catch (e) {
+        console.error(`[${agentId}] Stream update error:`, e.message);
+      }
+    }
+  };
+  return ctx;
+}
+
 // ── Message Debouncing ─────────────────────────────────────────────────────
 function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceId = null) {
   const key = getSessionKey(agentId, chatId);
@@ -817,9 +1136,53 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
 
     try { await bot.sendChatAction(chatId, 'typing'); } catch {}
 
+    // Create streaming context for live Telegram updates
+    const streamCtx = createStreamContext(bot, chatId, agentId);
+
     try {
-      const response = await callClaude(agentId, chatId, combined, media, msgTraceId);
-      await sendLongMessage(bot, chatId, response);
+      const response = await callClaude(agentId, chatId, combined, media, msgTraceId, streamCtx);
+
+      // Check if the response indicates a permission block
+      const blockedTool = detectPermissionBlock(response);
+      if (blockedTool) {
+        // Send response with approve/deny inline keyboard
+        const nonce = crypto.randomBytes(4).toString('hex');
+        const permKey = `perm:${agentId}:${chatId}:${nonce}`;
+        pendingPermissions.set(permKey, {
+          toolName: blockedTool,
+          message: combined,
+          mediaPath: media,
+          agentId,
+          chatId,
+          createdAt: Date.now()
+        });
+
+        // If streaming already sent the response, don't duplicate
+        if (!streamCtx.streamMessageId) {
+          await sendLongMessage(bot, chatId, response);
+        }
+
+        // Then send the permission prompt with buttons
+        await bot.sendMessage(chatId,
+          `*${agentId}* needs permission for \`${blockedTool}\`\n\nApprove to allow this tool and retry the task.`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: 'Approve', callback_data: `perm_approve:${nonce}` },
+                  { text: 'Always Allow', callback_data: `perm_always:${nonce}` },
+                  { text: 'Deny', callback_data: `perm_deny:${nonce}` }
+                ]
+              ]
+            }
+          }
+        );
+      } else if (!streamCtx.streamMessageId) {
+        // Streaming didn't send anything (e.g. OpenAI path) — send normally
+        await sendLongMessage(bot, chatId, response);
+      }
+      // If streaming already sent messages, the final onDone() edit handles the complete text
 
       // ── Track session history & persist to disk ──
       try {
@@ -842,20 +1205,43 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
         console.error(`[${agentId}] Session tracking error:`, sessErr.message);
       }
     } catch (err) {
-      const errMsg = err.message || '';
-      const nonFatalPatterns = [
-        /no stdin data received/i,
-        /redirect stdin explicitly/i,
-        /When using --print/i,
-        /--output-format/i,
-        /proceeding without it/i
-      ];
-      const isNonFatal = nonFatalPatterns.some(p => p.test(errMsg));
-      if (isNonFatal) {
-        console.log(`[${agentId}] Suppressed non-fatal CLI warning:`, errMsg.slice(0, 150));
+      // Clean up any progress messages on error
+      if (streamCtx.progressMessageId) {
+        try { await bot.deleteMessage(chatId, streamCtx.progressMessageId); } catch {}
+      }
+
+      // Check if error itself is a permission issue
+      const blockedTool = parsePermissionError(err.message, '');
+      if (blockedTool) {
+        const nonce = crypto.randomBytes(4).toString('hex');
+        const permKey = `perm:${agentId}:${chatId}:${nonce}`;
+        pendingPermissions.set(permKey, {
+          toolName: blockedTool,
+          message: combined,
+          mediaPath: media,
+          agentId,
+          chatId,
+          createdAt: Date.now()
+        });
+
+        await bot.sendMessage(chatId,
+          `*${agentId}* needs permission for \`${blockedTool}\`\n\nThe tool was blocked. Approve to retry with this tool allowed.`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: 'Approve', callback_data: `perm_approve:${nonce}` },
+                  { text: 'Always Allow', callback_data: `perm_always:${nonce}` },
+                  { text: 'Deny', callback_data: `perm_deny:${nonce}` }
+                ]
+              ]
+            }
+          }
+        );
       } else {
-        console.error(`[${agentId}] Error:`, errMsg);
-        await bot.sendMessage(chatId, `⚠️ Error: ${errMsg.slice(0, 200)}`);
+        console.error(`[${agentId}] Error:`, err.message);
+        await bot.sendMessage(chatId, `Error: ${err.message.slice(0, 200)}`);
       }
     }
   }, debounceMs);
@@ -1085,7 +1471,7 @@ function startBot(agentId, agentConfig, config) {
         const botCount = bots.size;
         const sessionCount = sessions.size;
         const proxyMode = getProxyMode(targetAgent);
-        const proxyInfo = proxyMode === 2 ? 'Dynamic (sonnet/opus)' : 'Original';
+        const proxyInfo = proxyMode === 2 ? 'Dynamic (haiku/opus)' : 'Original';
         await bot.sendMessage(msg.chat.id,
           `Agent: *${targetAgent}*\nProxy: ${proxyInfo}\nUptime: ${uptime}s\nActive bots: ${botCount}\nSessions: ${sessionCount}`,
           { parse_mode: 'Markdown' }
@@ -1107,7 +1493,7 @@ function startBot(agentId, agentConfig, config) {
         } else if (arg === '2') {
           setProxyMode(targetAgent, 2);
           await bot.sendMessage(msg.chat.id,
-            `*${targetAgent}* → dynamic routing active\n\n- Simple messages → sonnet (execution)\n- Complex messages → opus (planning)\n\nUse /proxy 1 to switch back.`,
+            `*${targetAgent}* → dynamic routing active\n\n- Simple messages → haiku (saves rate limit)\n- Complex messages → opus\n\nUse /proxy 1 to switch back.`,
             { parse_mode: 'Markdown' }
           );
         } else {
@@ -1117,7 +1503,7 @@ function startBot(agentId, agentConfig, config) {
           if (proxied.length > 0) {
             statusMsg += `\n\nAgents on dynamic routing: ${proxied.join(', ')}`;
           }
-          statusMsg += `\n\nCommands:\n- /proxy 1 — original model\n- /proxy 2 — dynamic (sonnet/opus)`;
+          statusMsg += `\n\nCommands:\n- /proxy 1 — original model\n- /proxy 2 — dynamic (haiku/opus)`;
           await bot.sendMessage(msg.chat.id, statusMsg, { parse_mode: 'Markdown' });
         }
         return;
@@ -1187,8 +1573,85 @@ function startBot(agentId, agentConfig, config) {
   bot.on('callback_query', async (query) => {
     const targetAgent = isShared ? (bot._currentAgent || agentId) : agentId;
     const chatId = query.message.chat.id;
+    const data = query.data || '';
+
+    // Handle permission approve/deny callbacks
+    if (data.startsWith('perm_')) {
+      const [action, nonce] = data.split(':');
+
+      // Find the pending permission by nonce (search all keys)
+      let permEntry = null;
+      let permKey = null;
+      for (const [key, val] of pendingPermissions.entries()) {
+        if (key.endsWith(`:${nonce}`)) {
+          permEntry = val;
+          permKey = key;
+          break;
+        }
+      }
+
+      if (!permEntry) {
+        await bot.answerCallbackQuery(query.id, { text: 'Permission request expired.' });
+        return;
+      }
+
+      const { toolName, message: origMessage, mediaPath: origMedia, agentId: origAgent, chatId: origChat } = permEntry;
+      pendingPermissions.delete(permKey);
+
+      if (action === 'perm_approve') {
+        await bot.answerCallbackQuery(query.id, { text: `${toolName} approved for this session` });
+        try {
+          await bot.editMessageText(`\`${toolName}\` approved for *${origAgent}* (this session)`, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown'
+          });
+        } catch {}
+        // Temporarily add the tool and re-run
+        const tools = getApprovedTools(origAgent);
+        tools.add(toolName);
+        try { await bot.sendChatAction(origChat, 'typing'); } catch {}
+        try {
+          const response = await callClaude(origAgent, origChat, origMessage, origMedia);
+          await sendLongMessage(bot, origChat, response);
+        } catch (retryErr) {
+          await bot.sendMessage(origChat, `Retry failed: ${retryErr.message.slice(0, 200)}`);
+        }
+
+      } else if (action === 'perm_always') {
+        await bot.answerCallbackQuery(query.id, { text: `${toolName} always allowed for ${origAgent}` });
+        await approveToolForAgent(origAgent, toolName);
+        try {
+          await bot.editMessageText(`\`${toolName}\` permanently approved for *${origAgent}*`, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown'
+          });
+        } catch {}
+        try { await bot.sendChatAction(origChat, 'typing'); } catch {}
+        try {
+          const response = await callClaude(origAgent, origChat, origMessage, origMedia);
+          await sendLongMessage(bot, origChat, response);
+        } catch (retryErr) {
+          await bot.sendMessage(origChat, `Retry failed: ${retryErr.message.slice(0, 200)}`);
+        }
+
+      } else if (action === 'perm_deny') {
+        await bot.answerCallbackQuery(query.id, { text: `${toolName} denied` });
+        try {
+          await bot.editMessageText(`\`${toolName}\` denied for *${origAgent}*`, {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown'
+          });
+        } catch {}
+      }
+      return;
+    }
+
+    // Regular callback queries (non-permission)
     await bot.answerCallbackQuery(query.id);
-    debounceMessage(targetAgent, chatId, `[Button pressed: ${query.data}]`, bot);
+    debounceMessage(targetAgent, chatId, `[Button pressed: ${data}]`, bot);
   });
 
   bot.on('polling_error', (err) => {

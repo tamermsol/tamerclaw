@@ -381,6 +381,21 @@ async function handleRequest(req, res) {
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   try {
+    // ── Public APK download ──
+    if (pathname === '/api/download/apk' && method === 'GET') {
+      const apkPath = path.join(paths.user, 'public', 'tamerclaw-latest.apk');
+      if (!fs.existsSync(apkPath)) return json(res, 404, { error: 'No APK available' });
+      const stat = fs.statSync(apkPath);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Length': stat.size,
+        'Content-Disposition': 'attachment; filename="tamerclaw-latest.apk"',
+        'Cache-Control': 'no-cache',
+      });
+      fs.createReadStream(apkPath).pipe(res);
+      return;
+    }
+
     // ── Auth (public — no token required) ──
     if (pathname === '/api/auth/login' && method === 'POST') {
       const body = await parseBody(req);
@@ -823,7 +838,15 @@ async function handleRequest(req, res) {
         setAgentActivity(agentId, 'idle');
         return json(res, 200, result);
       }
-      return json(res, 503, { error: 'Bridge not ready' });
+      // Fallback: try to kill claude processes for this agent
+      try {
+        const { execSync } = await import('child_process');
+        execSync(`pkill -f "claude.*${agentId}" 2>/dev/null || true`);
+        setAgentActivity(agentId, 'idle');
+        return json(res, 200, { stopped: true, method: 'pkill' });
+      } catch {
+        return json(res, 200, { stopped: false, error: 'No active process found' });
+      }
     }
 
     // ── Agent activity status ──

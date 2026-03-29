@@ -95,14 +95,14 @@ export function classifyComplexity(text) {
 
 /**
  * Get the dynamic model CLI flag based on message complexity.
- * Simple → sonnet (capable execution model)
- * Complex → opus (full planning power)
+ * Simple → haiku (preserves opus rate limit)
+ * Complex → opus (needs full power)
  *
- * @returns {string} CLI flag: 'sonnet' or 'opus'
+ * @returns {string} CLI flag: 'haiku' or 'opus'
  */
 export function getDynamicModel(text) {
   const complexity = classifyComplexity(text);
-  return complexity === 'complex' ? 'opus' : 'sonnet';
+  return complexity === 'complex' ? 'opus' : 'haiku';
 }
 
 /**
@@ -118,7 +118,7 @@ export function resolveProxyModel(agentId, originalCliFlag, messageText) {
 
   if (mode === 2) {
     const complexity = classifyComplexity(messageText);
-    const model = complexity === 'complex' ? 'opus' : 'sonnet';
+    const model = complexity === 'complex' ? 'opus' : 'haiku';
     return { model, proxied: true, complexity };
   }
 

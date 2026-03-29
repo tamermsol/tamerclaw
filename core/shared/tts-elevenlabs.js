@@ -250,14 +250,15 @@ export async function elevenLabsTTS(text, options = {}) {
       // De-esser: detect sibilance and reduce it
       'highpass=f=80',
       'equalizer=f=6500:t=q:w=2:g=-3',       // de-ess: gentle cut at sibilance freq
-      'equalizer=f=250:t=q:w=1.2:g=2.5',      // warmth: boost low-mids for richness
+      'equalizer=f=250:t=q:w=1.2:g=2',        // warmth: boost low-mids for richness
       'equalizer=f=500:t=q:w=2:g=-1.5',        // mud cut: reduce boxiness
-      'equalizer=f=3000:t=q:w=1.5:g=2',        // presence: clarity boost
-      'equalizer=f=8000:t=q:w=2:g=-2',            // harsh freq reduction
-      'equalizer=f=12000:t=q:w=2:g=-2',           // cut high ringing (no more boost — killed whistle)
-      'lowpass=f=13000:p=1',                       // gentle rolloff above 13kHz (was 14k/p=2 — too resonant)
-      // Dynamic processing — softer compression to avoid pumping artifacts
-      'acompressor=threshold=0.03:ratio=3:attack=5:release=100:makeup=1:knee=8',
+      'equalizer=f=3000:t=q:w=1.5:g=1.5',      // presence: clarity boost (reduced from +2)
+      'equalizer=f=8000:t=q:w=2:g=-3',          // harsh freq reduction (stronger cut)
+      'equalizer=f=10000:t=q:w=1.5:g=-4',       // kill whistle zone 10kHz
+      'equalizer=f=12000:t=q:w=2:g=-5',         // aggressive cut at 12kHz — whistle killer
+      'lowpass=f=11000:p=2',                     // steep rolloff above 11kHz (2-pole = 12dB/oct)
+      // Dynamic processing — gentler compression to avoid amplifying artifacts
+      'acompressor=threshold=0.05:ratio=2.5:attack=10:release=150:makeup=1:knee=10',
       // Limiter to prevent clipping
       'alimiter=limit=0.93:level=false',
       // Broadcast loudness normalization
@@ -265,7 +266,7 @@ export async function elevenLabsTTS(text, options = {}) {
     ].join(',');
 
     await execAsync(
-      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 96k -vbr on -compression_level 10 -application voip "${oggPath}"`,
+      `ffmpeg -y -i "${mp3Path}" -af "${audioFilters}" -c:a libopus -b:a 96k -vbr on -compression_level 10 -application audio "${oggPath}"`,
       { timeout: 30_000 }
     );
 

@@ -8,59 +8,35 @@
  * Handles callback queries (inline buttons)
  *
  * v3.2: Fixed sidecar .msgid read — stream edits now work correctly
- *
- * Adapted for TamerClaw: all paths resolved via paths.js, token from config.
  */
 
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import os from 'os';
 import TelegramBot from 'node-telegram-bot-api';
-import { execSync } from 'child_process';
 import paths from '../shared/paths.js';
 import { newTraceId } from '../shared/trace.js';
 import { transcribeAudio } from '../shared/transcribe.js';
 import { textToSpeech, getVoicePresets } from '../shared/tts.js';
-import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, setProvider, setModel, getActiveChats } from '../shared/voice-mode.js';
-import { getActiveProvider } from '../shared/tts.js';
-import { isAvailable as elevenLabsAvailable, getVoicePresets as getElevenLabsPresets } from '../shared/tts-elevenlabs.js';
-import { prepareBroadcast, analyzeResponse } from '../shared/smart-broadcast.js';
+import { enableVoiceMode, disableVoiceMode, getVoiceMode, setVoice, getActiveChats } from '../shared/voice-mode.js';
+import { prepareBroadcast } from '../shared/smart-broadcast.js';
 
-// ── Config-based token loading ───────────────────────────────────────────────
-function loadConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(paths.config, 'utf-8'));
-  } catch (e) {
-    console.error('[config] Failed to load:', e.message);
-    return {};
-  }
-}
-
-const config = loadConfig();
-const TOKEN = config.telegram?.sharedBotToken;
-if (!TOKEN) {
-  console.error('[FATAL] No telegram.sharedBotToken found in config at:', paths.config);
-  process.exit(1);
-}
-
-// ── Path Resolution ──────────────────────────────────────────────────────────
-// Runtime state in user/relay/ for workspace isolation (core/ is code only)
-const RELAY_RUNTIME = paths.relayRuntime;            // user/relay
-const INBOX = path.join(RELAY_RUNTIME, 'inbox.jsonl');
-const OUTBOX_DIR = paths.relayOutbox;                // user/relay/outbox
-const STREAM_OUTBOX_DIR = paths.relayStreamOutbox;   // user/relay/stream-outbox
+const TOKEN = '8498176943:AAEQhHri2LNdbXbVpdPtAVIe6riCIhKZTMY';
+const RELAY_DIR = paths.relayRuntime;
+const INBOX = path.join(RELAY_DIR, 'inbox.jsonl');
+const OUTBOX_DIR = paths.relayOutbox;
+const STREAM_OUTBOX_DIR = paths.relayStreamOutbox;
 const AGENTS_DIR = paths.agents;
-const CURRENT_AGENT_FILE = path.join(RELAY_RUNTIME, 'current-agent.txt');
+const CURRENT_AGENT_FILE = path.join(RELAY_DIR, 'current-agent.txt');
 const CREDENTIALS_DIR = paths.credentials;
 
-for (const dir of [RELAY_RUNTIME, OUTBOX_DIR, STREAM_OUTBOX_DIR]) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
+if (!fs.existsSync(OUTBOX_DIR)) fs.mkdirSync(OUTBOX_DIR, { recursive: true });
+if (!fs.existsSync(STREAM_OUTBOX_DIR)) fs.mkdirSync(STREAM_OUTBOX_DIR, { recursive: true });
 
 // ── Duplicate Process Guard ─────────────────────────────────────────────────
 // Prevent multiple relay bot.js from running (causes 409 Conflict on Telegram)
-const LOCK_FILE = path.join(RELAY_RUNTIME, 'bot.lock');
+import { execSync } from 'child_process';
+const LOCK_FILE = path.join(RELAY_DIR, 'bot.lock');
 try {
   if (fs.existsSync(LOCK_FILE)) {
     const oldPid = fs.readFileSync(LOCK_FILE, 'utf-8').trim();
@@ -110,7 +86,7 @@ function handleRateLimit(err) {
     if (until > rateLimitUntil) {
       rateLimitUntil = until;
       const secsLeft = Math.ceil((rateLimitUntil - Date.now()) / 1000);
-      console.log(`Rate-limited by Telegram — pausing ALL sends for ${secsLeft}s`);
+      console.log(`🛑 Rate-limited by Telegram — pausing ALL sends for ${secsLeft}s`);
     }
     return true;
   }
@@ -122,7 +98,7 @@ const _origSendMessage = bot.sendMessage.bind(bot);
 bot.sendMessage = async function(chatId, text, opts) {
   if (isRateLimited()) {
     const wait = Math.ceil((rateLimitUntil - Date.now()) / 1000);
-    console.log(`sendMessage blocked — rate-limited for ${wait}s more`);
+    console.log(`⏸️ sendMessage blocked — rate-limited for ${wait}s more`);
     return null;
   }
   try {
@@ -169,23 +145,12 @@ bot.sendDocument = async function(chatId, doc, opts) {
   }
 };
 
-// Wrap bot.sendVoice to respect rate limits
-const _origSendVoice = bot.sendVoice.bind(bot);
-bot.sendVoice = async function(chatId, voice, opts) {
-  if (isRateLimited()) return null;
-  try {
-    return await _origSendVoice(chatId, voice, opts);
-  } catch (err) {
-    if (handleRateLimit(err)) return null;
-    throw err;
-  }
-};
-
 // ── Dedup Cache ──────────────────────────────────────────────────────────────
 // Prevents the same message from being sent to the same chat twice within 30s.
 // Key = chatId + hash(text first 200 chars), Value = timestamp.
 const recentlySent = new Map();
 const DEDUP_WINDOW_MS = 30000; // 30 seconds
+const DEDUP_MEDIA_WINDOW_MS = 5000; // 5 seconds for media (less aggressive)
 
 function isDuplicate(chatId, text) {
   if (!text || text.length < 10) return false; // Skip short status messages
@@ -194,7 +159,7 @@ function isDuplicate(chatId, text) {
   const now = Date.now();
   const lastSent = recentlySent.get(key);
   if (lastSent && now - lastSent < DEDUP_WINDOW_MS) {
-    console.log(`Dedup: skipping duplicate message to ${chatId} (sent ${Math.floor((now - lastSent) / 1000)}s ago)`);
+    console.log(`🚫 Dedup: skipping duplicate message to ${chatId} (sent ${Math.floor((now - lastSent) / 1000)}s ago)`);
     return true;
   }
   recentlySent.set(key, now);
@@ -206,8 +171,8 @@ function isDuplicateMedia(chatId, mediaPath) {
   const key = `media:${chatId}:${mediaPath}`;
   const now = Date.now();
   const lastSent = recentlySent.get(key);
-  if (lastSent && now - lastSent < DEDUP_WINDOW_MS) {
-    console.log(`Dedup: skipping duplicate media to ${chatId}: ${path.basename(mediaPath)} (sent ${Math.floor((now - lastSent) / 1000)}s ago)`);
+  if (lastSent && now - lastSent < DEDUP_MEDIA_WINDOW_MS) {
+    console.log(`🚫 Dedup: skipping duplicate media to ${chatId}: ${path.basename(mediaPath)} (sent ${Math.floor((now - lastSent) / 1000)}s ago)`);
     return true;
   }
   recentlySent.set(key, now);
@@ -263,7 +228,7 @@ async function downloadMedia(fileId, agentId) {
     return new Promise((resolve, reject) => {
       fileStream.pipe(writeStream);
       writeStream.on('finish', () => {
-        console.log(`Media saved: ${localPath}`);
+        console.log(`📎 Media saved: ${localPath}`);
         resolve(localPath);
       });
       writeStream.on('error', (err) => {
@@ -277,175 +242,59 @@ async function downloadMedia(fileId, agentId) {
   }
 }
 
-// ── Voice Conversation Commands ───────────────────────────────────────────────
-
+// ── Voice Mode Command ──────────────────────────────────────────────────────
 bot.onText(/^\/voice(?:\s+(.*))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const args = (match[1] || '').trim().toLowerCase();
+  const arg = (match[1] || '').trim().toLowerCase();
 
-  if (!args || args === 'on') {
-    const has11labs = await elevenLabsAvailable();
-    enableVoiceMode(chatId, {
-      voice: has11labs ? 'josh' : 'en-casual',
-      provider: has11labs ? 'elevenlabs' : 'edge',
-    });
-    const engine = has11labs ? 'ElevenLabs' : 'Edge TTS';
-    await bot.sendMessage(chatId,
-      `🎙 Voice mode ON (${engine})\n\n` +
-      'Commands:\n' +
-      '/voice off — disable\n' +
-      '/voice set <voice> — change voice\n' +
-      '/voice voices — list presets\n' +
-      '/voice engine <elevenlabs|edge> — switch TTS engine\n' +
-      '/voice model <flash|quality|v3> — ElevenLabs model\n' +
-      '/voice textoff — voice only\n' +
-      '/voice texton — voice + text'
-    );
-    return;
-  }
-
-  if (args === 'off') {
+  if (!arg || arg === 'status') {
+    const config = getVoiceMode(chatId);
+    if (config) {
+      bot.sendMessage(chatId, `🎙 Voice mode: ON\n• Voice: ${config.voice}\n• Text too: ${config.textToo ? 'yes' : 'no'}`);
+    } else {
+      bot.sendMessage(chatId, '🔇 Voice mode: OFF\nUse /voice on to enable');
+    }
+  } else if (arg === 'on') {
+    enableVoiceMode(chatId);
+    bot.sendMessage(chatId, '🎙 Voice mode enabled — I\'ll reply with voice notes.\nSmart broadcast will decide the best format per message.');
+  } else if (arg === 'off') {
     disableVoiceMode(chatId);
-    await bot.sendMessage(chatId, '🔇 Voice mode OFF — back to text responses.');
-    return;
-  }
-
-  if (args === 'status') {
-    const mode = getVoiceMode(chatId);
-    if (mode) {
-      const activeProvider = mode.provider || await getActiveProvider();
-      await bot.sendMessage(chatId,
-        `🎙 Voice mode: ON\n` +
-        `• Engine: ${activeProvider}\n` +
-        `• Voice: ${mode.voice}\n` +
-        `• Model: ${mode.model || 'flash'}\n` +
-        `• Text alongside: ${mode.textToo ? 'yes' : 'no'}\n` +
-        `• Since: ${mode.enabledAt}`
-      );
+    bot.sendMessage(chatId, '🔇 Voice mode disabled — back to text only.');
+  } else if (arg.startsWith('set ')) {
+    const voice = arg.slice(4).trim();
+    const presets = getVoicePresets();
+    if (presets[voice]) {
+      setVoice(chatId, voice);
+      bot.sendMessage(chatId, `🎙 Voice changed to: ${voice}`);
     } else {
-      await bot.sendMessage(chatId, '🔇 Voice mode: OFF\nUse /voice on to enable');
+      bot.sendMessage(chatId, `Unknown voice. Available: ${Object.keys(presets).join(', ')}`);
     }
-    return;
+  } else if (arg === 'voices') {
+    const presets = getVoicePresets();
+    bot.sendMessage(chatId, '🎙 Available voices:\n' + Object.keys(presets).map(k => `• ${k}`).join('\n'));
+  } else if (arg === 'textoff') {
+    const { setTextMode } = await import('../shared/voice-mode.js');
+    setTextMode(chatId, false);
+    bot.sendMessage(chatId, '🎙 Text delivery disabled — voice only mode.');
+  } else if (arg === 'texton') {
+    const { setTextMode } = await import('../shared/voice-mode.js');
+    setTextMode(chatId, true);
+    bot.sendMessage(chatId, '🎙 Text delivery re-enabled alongside voice.');
   }
-
-  if (args.startsWith('set ')) {
-    const voiceName = args.slice(4).trim();
-    setVoice(chatId, voiceName);
-    await bot.sendMessage(chatId, `🎙 Voice set to: ${voiceName}`);
-    return;
-  }
-
-  if (args === 'voices') {
-    const mode = getVoiceMode(chatId);
-    const provider = mode?.provider || await getActiveProvider();
-
-    let msg_text = '🎙 Available Voices:\n\n';
-
-    if (provider === 'elevenlabs') {
-      const presets = getElevenLabsPresets();
-      msg_text += '🔷 ElevenLabs:\n';
-      msg_text += presets.map(v => `• ${v.key} — ${v.description}`).join('\n');
-      msg_text += '\n\n💡 Use /voice engine edge to see Edge TTS voices';
-    } else {
-      const edgePresets = getVoicePresets();
-      const edgeList = Object.entries(edgePresets.edge || {}).map(([k, v]) => `• ${k} → ${v}`).join('\n');
-      msg_text += '⚪ Edge TTS:\n' + edgeList;
-      msg_text += '\n\n💡 Use /voice engine elevenlabs for premium voices';
-    }
-
-    msg_text += '\n\nUse: /voice set <name>';
-    await bot.sendMessage(chatId, msg_text);
-    return;
-  }
-
-  if (args.startsWith('engine ') || args.startsWith('provider ')) {
-    const engineName = args.split(' ')[1]?.trim();
-    if (engineName === 'elevenlabs' || engineName === '11labs') {
-      const has11labs = await elevenLabsAvailable();
-      if (!has11labs) {
-        await bot.sendMessage(chatId, '⚠️ ElevenLabs API key not configured.\nSet ELEVENLABS_API_KEY or add to user/config.json');
-        return;
-      }
-      setProvider(chatId, 'elevenlabs');
-      // Switch to a good default ElevenLabs voice
-      const mode = getVoiceMode(chatId);
-      if (mode && !getElevenLabsPresets().find(v => v.key === mode.voice)) {
-        setVoice(chatId, 'josh');
-      }
-      await bot.sendMessage(chatId, '🔷 Switched to ElevenLabs — premium voice quality.\nUse /voice voices to see available voices.');
-    } else if (engineName === 'edge' || engineName === 'free') {
-      setProvider(chatId, 'edge');
-      await bot.sendMessage(chatId, '⚪ Switched to Edge TTS (free).\nUse /voice voices to see available voices.');
-    } else {
-      await bot.sendMessage(chatId, '⚠️ Unknown engine. Use: elevenlabs or edge');
-    }
-    return;
-  }
-
-  if (args.startsWith('model ')) {
-    const modelName = args.slice(6).trim();
-    const validModels = ['flash', 'quality', 'v3'];
-    if (validModels.includes(modelName)) {
-      setModel(chatId, modelName);
-      const desc = {
-        flash: 'Flash v2.5 — fast, low latency',
-        quality: 'Multilingual v2 — highest quality',
-        v3: 'V3 — newest, emotion tags support',
-      };
-      await bot.sendMessage(chatId, `🎙 Model: ${desc[modelName]}`);
-    } else {
-      await bot.sendMessage(chatId, `⚠️ Unknown model. Available: ${validModels.join(', ')}`);
-    }
-    return;
-  }
-
-  if (args === 'textoff') {
-    const mode = getVoiceMode(chatId);
-    if (mode) {
-      const { setTextMode } = await import('../shared/voice-mode.js');
-      setTextMode(chatId, false);
-      await bot.sendMessage(chatId, '🎙 Text mode OFF — voice only responses.');
-    } else {
-      await bot.sendMessage(chatId, '⚠️ Voice mode not active. Use /voice on first.');
-    }
-    return;
-  }
-
-  if (args === 'texton') {
-    const mode = getVoiceMode(chatId);
-    if (mode) {
-      const { setTextMode } = await import('../shared/voice-mode.js');
-      setTextMode(chatId, true);
-      await bot.sendMessage(chatId, '🎙 Text mode ON — you\'ll get voice + text.');
-    } else {
-      await bot.sendMessage(chatId, '⚠️ Voice mode not active. Use /voice on first.');
-    }
-    return;
-  }
-
-  await bot.sendMessage(chatId,
-    '🎙 Voice Commands:\n' +
-    '/voice on — enable voice mode\n' +
-    '/voice off — disable\n' +
-    '/voice status — current state & engine\n' +
-    '/voice set <voice> — change voice preset\n' +
-    '/voice voices — list available presets\n' +
-    '/voice engine <elevenlabs|edge> — switch TTS engine\n' +
-    '/voice model <flash|quality|v3> — ElevenLabs model\n' +
-    '/voice textoff — voice only\n' +
-    '/voice texton — voice + text'
-  );
 });
 
 // ── Incoming Messages ────────────────────────────────────────────────────────
 
 bot.on('message', async (msg) => {
+  // Skip /voice commands (handled above)
+  if (msg.text && msg.text.startsWith('/voice')) return;
+
   const agentId = getCurrentAgent();
   const userId = msg.from?.id;
 
   // Allowlist check (per-agent, then default fallback)
   if (!isUserAllowed(userId, agentId)) {
-    console.log(`Blocked message from ${userId} for agent ${agentId} (not in allowlist)`);
+    console.log(`🚫 Blocked message from ${userId} for agent ${agentId} (not in allowlist)`);
     return;
   }
 
@@ -502,7 +351,7 @@ bot.on('message', async (msg) => {
 
   await fsp.appendFile(INBOX, JSON.stringify(entry) + '\n');
   bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
-  console.log(`[${entry.traceId}] ${entry.from}: ${entry.text.slice(0, 80)}${entry.media ? ` [${entry.media}]` : ''}`);
+  console.log(`[${entry.traceId}] 📩 ${entry.from}: ${entry.text.slice(0, 80)}${entry.media ? ` [${entry.media}]` : ''}`);
 });
 
 // ── Callback Queries (Inline Buttons) ────────────────────────────────────────
@@ -523,20 +372,18 @@ bot.on('callback_query', async (query) => {
   };
 
   fsp.appendFile(INBOX, JSON.stringify(entry) + '\n').catch(e => console.error('Inbox write error:', e.message));
-  console.log(`[${entry.traceId}] ${entry.from}: ${entry.text}`);
+  console.log(`[${entry.traceId}] 🔘 ${entry.from}: ${entry.text}`);
 });
 
 // ── Typing Indicator ─────────────────────────────────────────────────────────
 
-const PROCESSING_FILE = path.join(RELAY_RUNTIME, 'processing.json');
+const PROCESSING_FILE = path.join(RELAY_DIR, 'processing.json');
 setInterval(async () => {
   try {
     const content = await fsp.readFile(PROCESSING_FILE, 'utf-8');
     const data = JSON.parse(content);
     if (data.chatId) {
-      const voiceConfig = getVoiceMode(data.chatId);
-      const action = voiceConfig ? 'record_voice' : 'typing';
-      bot.sendChatAction(data.chatId, action).catch(() => {});
+      bot.sendChatAction(data.chatId, 'typing').catch(() => {});
     }
   } catch {}
 }, 4000);
@@ -574,7 +421,6 @@ setInterval(async () => {
                     bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
                     const voiceResult = await bot.sendVoice(data.chatId, item.audioPath);
                     if (voiceResult) voiceSent = true;
-                    // Clean up temp file
                     try { fs.unlinkSync(item.audioPath); } catch {}
                   } else if (item.type === 'text') {
                     await sendLongMessage(data.chatId, item.content);
@@ -582,12 +428,11 @@ setInterval(async () => {
                 }
 
                 if (voiceSent || deliverables.some(d => d.type === 'text')) {
-                  console.log(`${traceTag}-> ${data.chatId} [SMART-VOICE]: ${deliverables.filter(d => d.type === 'voice').length} voice + ${deliverables.filter(d => d.type === 'text').length} text segments`);
+                  console.log(`${traceTag}[SMART-VOICE] → ${data.chatId}: ${deliverables.filter(d => d.type === 'voice').length} voice + ${deliverables.filter(d => d.type === 'text').length} text segments`);
                   sent = true;
                 }
               } catch (broadcastErr) {
                 console.error(`${traceTag}[smart-broadcast] Failed, falling back to text:`, broadcastErr.message);
-                // Fallback to plain text
                 const result = await sendLongMessage(data.chatId, data.text);
                 if (result !== null) sent = true;
               }
@@ -688,7 +533,7 @@ async function sendWithMarkdownFallback(chatId, text) {
 }
 
 /**
- * Split text into chunks <= maxLen, preferring paragraph/line boundaries.
+ * Split text into chunks ≤ maxLen, preferring paragraph/line boundaries.
  * Markdown-aware: won't split inside code blocks (``` ... ```)
  */
 function splitMessageSafe(text, maxLen) {
@@ -852,7 +697,7 @@ setInterval(async () => {
         // If done and there's remaining overflow text, send it as final
         if (overflow) {
           await sendWithMarkdownFallback(data.chatId, overflow);
-          console.log(`Stream final overflow -> ${data.chatId}`);
+          console.log(`📤 Stream final overflow → ${data.chatId}`);
         }
         try { await fsp.unlink(filePath); } catch {}
         try { await fsp.unlink(filePath.replace('.json', '.msgid')); } catch {}
@@ -864,22 +709,15 @@ setInterval(async () => {
         const sent = await sendWithMarkdownFallback(data.chatId, data.text);
         if (sent && sent.message_id) {
           if (data.done) {
-            console.log(`Stream complete (single send) -> ${data.chatId}`);
-            // Send voice if voice mode active
-            const singleVoiceConfig = getVoiceMode(data.chatId);
-            if (singleVoiceConfig && data.text) {
-              try {
-                bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
-                const singleOgg = await textToSpeech(data.text, { voice: singleVoiceConfig.voice });
-                await bot.sendVoice(data.chatId, singleOgg);
-                try { (await import('fs')).unlinkSync(singleOgg); } catch {}
-              } catch (e) { console.error('[tts] Single-send voice failed:', e.message); }
-            }
+            console.log(`📤 Stream complete (single send) → ${data.chatId}`);
             try { await fsp.unlink(filePath); } catch {}
             // Clean sidecar too
             try { await fsp.unlink(filePath.replace('.json', '.msgid')); } catch {}
           } else {
-            // Write messageId to a SIDECAR file instead of modifying the stream JSON.
+            // FIX: Write messageId to a SIDECAR file instead of modifying the stream JSON.
+            // This prevents the race condition where watcher.js overwrites messageId
+            // because both processes were reading/writing the same file simultaneously.
+            // Watcher reads .msgid file; bot.js writes .msgid file. No conflict.
             const msgIdFile = filePath.replace('.json', '.msgid');
             try {
               await fsp.writeFile(msgIdFile, String(sent.message_id));
@@ -895,20 +733,7 @@ setInterval(async () => {
       await telegramEditWithRetry(data.chatId, data.messageId, data.text);
 
       if (data.done) {
-        console.log(`Stream complete (final edit) -> ${data.chatId}`);
-        // Send voice version if voice mode is active
-        const streamVoiceConfig = getVoiceMode(data.chatId);
-        if (streamVoiceConfig && data.text) {
-          try {
-            bot.sendChatAction(data.chatId, 'record_voice').catch(() => {});
-            const streamOgg = await textToSpeech(data.text, { voice: streamVoiceConfig.voice });
-            await bot.sendVoice(data.chatId, streamOgg);
-            try { (await import('fs')).unlinkSync(streamOgg); } catch {}
-            console.log(`Stream voice sent -> ${data.chatId}`);
-          } catch (ttsErr) {
-            console.error('[tts] Stream voice failed:', ttsErr.message);
-          }
-        }
+        console.log(`📤 Stream complete (final edit) → ${data.chatId}`);
         try { await fsp.unlink(filePath); } catch {}
         try { await fsp.unlink(filePath.replace('.json', '.msgid')); } catch {}
       }
@@ -921,7 +746,8 @@ setInterval(async () => {
       console.error('Stream outbox error:', e.message);
       if (data.done) {
         // Stream delivery failed — fall back to sending as regular outbox message
-        console.log(`Stream delivery failed, falling back to outbox for chatId ${data.chatId}`);
+        // This ensures the user ALWAYS gets the final response
+        console.log(`⚠️ Stream delivery failed, falling back to outbox for chatId ${data.chatId}`);
         try {
           const fallbackPath = path.join(OUTBOX_DIR, `${Date.now()}-fallback.json`);
           await fsp.writeFile(fallbackPath, JSON.stringify({ chatId: data.chatId, text: data.text }));
