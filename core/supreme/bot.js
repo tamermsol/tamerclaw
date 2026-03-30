@@ -925,6 +925,17 @@ bot.on('message', async (msg) => {
 
   console.log(`📩 ${username}: ${(msg.text || '[media]').slice(0, 80)}`);
 
+  // Persist chat ID for update notifications (in case allowlist is empty)
+  try {
+    const lastChatsFile = path.join(SUPREME_RUNTIME, 'last-chat-ids.json');
+    let knownChats = new Set();
+    if (fs.existsSync(lastChatsFile)) {
+      try { knownChats = new Set(JSON.parse(fs.readFileSync(lastChatsFile, 'utf-8'))); } catch {}
+    }
+    knownChats.add(String(chatId));
+    fs.writeFileSync(lastChatsFile, JSON.stringify([...knownChats]));
+  } catch {}
+
   // Allowlist check
   if (!isUserAllowed(userId)) {
     console.log(`🚫 Blocked message from ${userId} (not in supreme allowlist)`);
@@ -1122,6 +1133,94 @@ function writeHealth() {
 
 setInterval(writeHealth, 60000);
 writeHealth();
+
+// ── Update Announcement ──────────────────────────────────────────────────────
+// After ./tamerclaw update, the CLI writes update-notify.json to the runtime dir.
+// On startup, we check for it and announce the update to all allowed users.
+(async function announceUpdateIfNeeded() {
+  const notifyFile = path.join(SUPREME_RUNTIME, 'update-notify.json');
+  try {
+    if (!fs.existsSync(notifyFile)) return;
+
+    const notify = JSON.parse(fs.readFileSync(notifyFile, 'utf-8'));
+    // Delete immediately to prevent re-announcing on next restart
+    fs.unlinkSync(notifyFile);
+
+    const { oldVersion, newVersion, commits, timestamp } = notify;
+    if (!newVersion) return;
+
+    // Build the announcement message
+    let msg = `🔄 *TamerClaw Updated*\n\n`;
+    if (oldVersion && oldVersion !== newVersion) {
+      msg += `v${oldVersion} → v${newVersion}\n\n`;
+    } else {
+      msg += `v${newVersion}\n\n`;
+    }
+
+    if (commits && commits.length > 0) {
+      msg += `*What's new:*\n`;
+      for (const commit of commits.slice(0, 10)) {
+        // Clean up commit message — remove conventional commit prefix for readability
+        const cleaned = commit.replace(/^[a-f0-9]+ /, '• ');
+        msg += `${cleaned}\n`;
+      }
+    }
+
+    msg += `\n_Updated ${timestamp ? 'at ' + new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : 'just now'}_`;
+
+    // Determine who to notify — use allowlist (user IDs = chat IDs for private chats)
+    let chatIds = [];
+
+    // Try per-agent allowlist first, then default
+    for (const filename of ['telegram-supreme-allowFrom.json', 'telegram-default-allowFrom.json']) {
+      const allowPath = path.join(CREDENTIALS_DIR, filename);
+      if (fs.existsSync(allowPath)) {
+        try {
+          const allowlist = JSON.parse(fs.readFileSync(allowPath, 'utf-8'));
+          if (allowlist.users && Array.isArray(allowlist.users)) {
+            chatIds = allowlist.users.map(id => String(id));
+          }
+        } catch {}
+        break;
+      }
+    }
+
+    // Fallback: check for last-chat-ids.json (persisted from message interactions)
+    if (chatIds.length === 0) {
+      const lastChatsFile = path.join(SUPREME_RUNTIME, 'last-chat-ids.json');
+      if (fs.existsSync(lastChatsFile)) {
+        try {
+          chatIds = JSON.parse(fs.readFileSync(lastChatsFile, 'utf-8'));
+        } catch {}
+      }
+    }
+
+    if (chatIds.length === 0) {
+      console.log('[supreme] Update notification: no chat IDs to notify');
+      return;
+    }
+
+    // Small delay to let Telegram polling fully initialize
+    await new Promise(r => setTimeout(r, 3000));
+
+    for (const chatId of chatIds) {
+      try {
+        await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+        console.log(`[supreme] Update announcement sent to ${chatId}`);
+      } catch (err) {
+        // Retry without markdown
+        try {
+          await bot.sendMessage(chatId, msg.replace(/[*_`]/g, ''));
+          console.log(`[supreme] Update announcement sent to ${chatId} (plaintext)`);
+        } catch (e2) {
+          console.error(`[supreme] Failed to notify ${chatId}:`, e2.message?.slice(0, 100));
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[supreme] Update announce error:', err.message);
+  }
+})();
 
 // ── Graceful Shutdown ─────────────────────────────────────────────────────────
 let shuttingDown = false;

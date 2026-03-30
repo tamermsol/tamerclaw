@@ -12,6 +12,7 @@ import { addJob, removeJob, listJobs, listAllJobs, updateJob } from '../cron/sch
 import { readConfigCached } from '../shared/async-fs.js';
 import paths from '../shared/paths.js';
 import { transcribeAudio } from '../shared/transcribe.js';
+import { textToSpeech } from '../shared/tts.js';
 
 let bridgeRef = null; // Set by bridge on startup
 
@@ -930,6 +931,50 @@ async function handleRequest(req, res) {
           sessions: recentSessions,
           hasNew: recentSessions.length > 0,
         });
+      }
+    }
+
+    // ── TTS (Text-to-Speech) endpoint for web/mobile voice calls ──
+    // POST /api/agents/:id/tts  { text, voice?, provider?, model? }
+    // Returns audio stream
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/tts$/) && method === 'POST') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+
+      const body = await parseBody(req);
+      if (!body.text) return json(res, 400, { error: 'text required' });
+
+      try {
+        const audioPath = await textToSpeech(body.text, {
+          voice: body.voice || 'josh',
+          provider: body.provider || undefined,
+          model: body.model || 'flash',
+        });
+
+        if (!fs.existsSync(audioPath)) {
+          return json(res, 500, { error: 'TTS generation failed — no audio file' });
+        }
+
+        const stat = fs.statSync(audioPath);
+        const ext = path.extname(audioPath).toLowerCase();
+        const mimeMap = { '.ogg': 'audio/ogg', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.opus': 'audio/opus' };
+        const contentType = mimeMap[ext] || 'audio/ogg';
+
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Cache-Control': 'no-cache',
+        });
+        const stream = fs.createReadStream(audioPath);
+        stream.pipe(res);
+        stream.on('end', () => {
+          // Clean up temp file
+          try { fs.unlinkSync(audioPath); } catch {}
+        });
+        return;
+      } catch (err) {
+        console.error(`[gateway] TTS error:`, err.message);
+        return json(res, 500, { error: `TTS failed: ${err.message}` });
       }
     }
 

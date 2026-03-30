@@ -1004,6 +1004,35 @@ WantedBy=$SVC_WANTED_BY"
     info "$services_restarted service(s) restarted"
   fi
 
+  # ── Write update notification for Supreme Agent to announce ──────────────
+  if [ "$old_head" != "$remote_head" ] && [ -d "$SCRIPT_DIR/user/agents/supreme" ]; then
+    local notify_file="$SCRIPT_DIR/user/agents/supreme/update-notify.json"
+    local commits_json="["
+    local first=true
+    while IFS= read -r line; do
+      # Escape double quotes in commit messages for JSON
+      local escaped
+      escaped=$(echo "$line" | sed 's/"/\\"/g')
+      if $first; then
+        commits_json="$commits_json\"$escaped\""
+        first=false
+      else
+        commits_json="$commits_json,\"$escaped\""
+      fi
+    done < <(git -C "$SCRIPT_DIR" log --oneline "${old_head}..HEAD" 2>/dev/null | head -10)
+    commits_json="$commits_json]"
+
+    cat > "$notify_file" <<NOTIFY_EOF
+{
+  "oldVersion": "${old_version}",
+  "newVersion": "${new_version}",
+  "commits": ${commits_json},
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+NOTIFY_EOF
+    info "Supreme Agent will announce the update on restart"
+  fi
+
   echo ""
   info "Updated: v${old_version} → v${new_version}"
   echo ""

@@ -118,6 +118,29 @@ class ApiClient {
     }
   });
 
+  /// POST that returns raw bytes (for TTS audio, file downloads, etc.)
+  Future<List<int>?> postRaw(String path, Map<String, dynamic> body) => _withAutoRefresh(() async {
+    try {
+      final response = await http
+          .post(_uri(path), headers: _headers, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return response.bodyBytes;
+      } else if (response.statusCode == 401) {
+        throw const ApiUnauthorizedException('Unauthorized.');
+      }
+      return null;
+    } on TimeoutException {
+      return null;
+    } on SocketException {
+      return null;
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      return null;
+    }
+  }) as Future<List<int>?>;
+
   Future<dynamic> delete(String path) => _withAutoRefresh(() async {
     try {
       final response = await http

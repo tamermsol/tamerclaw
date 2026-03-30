@@ -28,6 +28,9 @@ abstract final class ApiEndpoints {
   // Stop agent (kill active Claude process)
   static String stopAgent(String agentId) => '/api/agents/$agentId/stop';
 
+  // TTS (Text-to-Speech) for voice calls
+  static String agentTts(String agentId) => '/api/agents/$agentId/tts';
+
   // Polling endpoint for 2-way communication
   static String pollMessages(String agentId, {String? chatId, String? since}) {
     final params = <String>[];

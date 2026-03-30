@@ -12,6 +12,7 @@ import 'features/agents/agents_screen.dart';
 import 'features/agents/agent_detail_screen.dart';
 import 'features/agents/create_agent_screen.dart';
 import 'features/chat/chat_screen.dart';
+import 'features/call/call_screen.dart';
 import 'features/chat/sessions_screen.dart';
 import 'features/cron/cron_jobs_screen.dart';
 import 'features/settings/settings_screen.dart';
@@ -170,6 +171,30 @@ final routerProvider = Provider<GoRouter>((ref) {
               return SlideTransition(
                 position: Tween<Offset>(
                   begin: const Offset(1.0, 0.0),
+                  end: Offset.zero,
+                ).animate(CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeOutCubic,
+                )),
+                child: child,
+              );
+            },
+          );
+        },
+      ),
+      GoRoute(
+        path: '/agents/:id/call',
+        parentNavigatorKey: _rootNavigatorKey,
+        pageBuilder: (context, state) {
+          final agentId = state.pathParameters['id']!;
+          return CustomTransitionPage(
+            key: state.pageKey,
+            child: CallScreen(agentId: agentId),
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+              return SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0.0, 1.0),
                   end: Offset.zero,
                 ).animate(CurvedAnimation(
                   parent: animation,

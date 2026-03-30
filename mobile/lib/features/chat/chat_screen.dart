@@ -262,6 +262,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObse
               },
             ),
           IconButton(
+            icon: const Icon(Icons.call_rounded,
+                color: AppColors.textSecondary, size: 22),
+            tooltip: 'Voice Call',
+            onPressed: () {
+              HapticFeedback.lightImpact();
+              context.push('/agents/${widget.agentId}/call');
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.add_comment_outlined,
                 color: AppColors.textSecondary, size: 22),
             tooltip: 'New Chat',
