@@ -1,0 +1,48 @@
+{
+  "_readme": "Agent configuration file. Copy this template and fill in agent-specific values.",
+  "agent": {
+    "id": "{{agent_id}}",
+    "displayName": "{{DISPLAY_NAME}}",
+    "emoji": "{{emoji}}",
+    "role": "{{role_description}}",
+    "version": "1.0.0"
+  },
+  "telegram": {
+    "tokenEnv": "{{AGENT_ID_UPPER}}_BOT_TOKEN",
+    "token": "",
+    "allowedChats": [],
+    "dmPolicy": "open",
+    "groupPolicy": "allowlist"
+  },
+  "model": {
+    "default": "claude-opus-4-6",
+    "routing": {
+      "simple": "claude-haiku-4-5",
+      "complex": "claude-opus-4-6",
+      "default": "claude-sonnet-4-6",
+      "complexPatterns": [
+        "plan", "architect", "design", "research", "evaluate",
+        "debug", "fix", "refactor", "optimize", "investigate"
+      ]
+    }
+  },
+  "workspace": {
+    "cwd": "user/agents/{{agent_id}}/workspace",
+    "projectDir": ""
+  },
+  "session": {
+    "maxTurns": 10,
+    "timeoutMs": 1800000,
+    "persistSessions": true
+  },
+  "tools": {
+    "allowed": [
+      "Read", "Write", "Edit", "Bash",
+      "Glob", "Grep", "WebSearch", "WebFetch", "Agent"
+    ]
+  },
+  "memory": {
+    "enabled": true,
+    "dir": "user/agents/{{agent_id}}/memory"
+  }
+}

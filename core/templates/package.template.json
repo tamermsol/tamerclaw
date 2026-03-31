@@ -1,0 +1,14 @@
+{
+  "name": "{{agent_id}}-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "{{DISPLAY_NAME}} — {{role_description}}",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

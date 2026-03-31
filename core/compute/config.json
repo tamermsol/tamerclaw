@@ -1,0 +1,36 @@
+{
+  "nodes": {
+    "mac-mini": {
+      "name": "Mac Mini M1",
+      "host": "localhost",
+      "port": 2222,
+      "user": "msoldev",
+      "description": "Apple M1 (8-core CPU, 8-core GPU), 8GB RAM, 256GB SSD",
+      "capabilities": [
+        "voice-processing",
+        "image-processing",
+        "ml-inference",
+        "apple-silicon",
+        "ffmpeg",
+        "whisper-local"
+      ],
+      "max_concurrent_tasks": 3,
+      "status": "active",
+      "notes": "Connected via reverse SSH tunnel on port 2222. Tunnel managed by autossh on Mac Mini."
+    }
+  },
+  "tunnel": {
+    "method": "reverse-ssh",
+    "server_listen_port": 2222,
+    "target_host": "localhost",
+    "target_port": 22,
+    "keepalive_interval": 30,
+    "reconnect_delay": 5
+  },
+  "defaults": {
+    "timeout_ms": 120000,
+    "max_retries": 2,
+    "temp_dir_remote": "/tmp/claude-compute",
+    "temp_dir_local": "compute/tmp"
+  }
+}

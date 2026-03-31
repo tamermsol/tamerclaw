@@ -37,6 +37,17 @@ export const paths = {
   meetingsInbox: path.join(TAMERCLAW_HOME, 'user', 'meetings', 'inbox'),
   meetingsRequests: path.join(TAMERCLAW_HOME, 'user', 'meetings', 'requests'),
 
+  // Compute extension
+  computeConfig: path.join(TAMERCLAW_HOME, 'user', 'compute', 'config.json'),
+  computeWatchdog: path.join(TAMERCLAW_HOME, 'core', 'compute', 'watchdog.js'),
+
+  // PM2 guard system
+  pm2Guard: path.join(TAMERCLAW_HOME, 'core', 'pm2', 'pm2-guard.sh'),
+  pm2Registry: path.join(TAMERCLAW_HOME, 'user', 'pm2', 'registry.json'),
+
+  // Plugins
+  plugins: path.join(TAMERCLAW_HOME, 'core', 'shared', 'plugins'),
+
   // Runtime state — lives in user/ for workspace isolation & update safety
   proxyState: path.join(TAMERCLAW_HOME, 'user', 'proxy-state.json'),
   rateUsage: path.join(TAMERCLAW_HOME, 'user', 'rate-usage.json'),

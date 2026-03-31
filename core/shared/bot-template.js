@@ -27,6 +27,30 @@ import paths from './paths.js';
 import { transcribeAudio } from './transcribe.js';
 import { archiveSession, formatSessionsList, getSessionByIndex, getSessionById } from './session-history.js';
 import { MeetingCommandHandler } from '../meetings/meeting-commands.js';
+import { createTeamCommands, getTeamLeaderPrompt, getTeamMemberPrompt, isTeamLeader } from './team-leader.js';
+
+// ── Plugin Loader ──────────────────────────────────────────────────────────────
+const __shared_dir = path.dirname(new URL(import.meta.url).pathname);
+
+function loadPlugins(agentDir) {
+  const pluginsDir = path.join(__shared_dir, 'plugins');
+  const configPath = path.join(agentDir, 'config.json');
+  let pluginNames = ['code-review', 'security-guidance', 'code-simplifier']; // defaults
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (config.plugins) pluginNames = config.plugins;
+  } catch {}
+
+  const pluginContents = [];
+  for (const name of pluginNames) {
+    try {
+      const content = fs.readFileSync(path.join(pluginsDir, `${name}.md`), 'utf-8');
+      pluginContents.push(content);
+    } catch {}
+  }
+  return pluginContents.length > 0 ? '\n\n# Quality Guidelines\n\n' + pluginContents.join('\n\n---\n\n') : '';
+}
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TELEGRAM_MAX_LEN = 4096;
@@ -173,6 +197,13 @@ export function createBot(config) {
     ...fileConfig,
     ...config,
   };
+
+  // ── Auto-inject team leader commands ──────────────────────────────────────
+  if (isTeamLeader(cfg.agentId)) {
+    const teamCmds = createTeamCommands(cfg.agentId);
+    cfg.customCommands = { ...teamCmds, ...(cfg.customCommands || {}) };
+    console.log(`[${cfg.agentId}] Team leader commands injected`);
+  }
 
   // ── Validate required fields ──────────────────────────────────────────────
   if (!cfg.token) {
@@ -458,9 +489,20 @@ export function createBot(config) {
       } catch {}
     }
 
-    // Shared files: SOUL.md, GLOBAL_POLICY.md
+    // Shared files: SOUL.md, GLOBAL_POLICY.md, env-awareness.md
     try { parts.push(fs.readFileSync(path.join(paths.shared, 'SOUL.md'), 'utf-8')); } catch {}
     try { parts.push(fs.readFileSync(path.join(paths.shared, 'GLOBAL_POLICY.md'), 'utf-8')); } catch {}
+    try { parts.push(fs.readFileSync(path.join(paths.shared, 'env-awareness.md'), 'utf-8')); } catch {}
+
+    // Load quality guideline plugins
+    const pluginContent = loadPlugins(AGENT_DIR);
+    if (pluginContent) parts.push(pluginContent);
+
+    // Team context (leader or member)
+    const teamLeaderCtx = getTeamLeaderPrompt(AGENT_ID);
+    const teamMemberCtx = getTeamMemberPrompt(AGENT_ID);
+    if (teamLeaderCtx) parts.push(teamLeaderCtx);
+    else if (teamMemberCtx) parts.push(teamMemberCtx);
 
     // Recent daily memory
     parts.push(...loadRecentMemory());
@@ -1313,7 +1355,8 @@ ${CWD}
 
     // ── /start command ───────────────────────────────────────────────────
     if (msg.text?.startsWith('/start')) {
-      const greeting = cfg.greeting || `${cfg.statusEmoji} *${AGENT_ID} Online*\n\nCommands:\n• /status — Agent status\n• /stop — Stop current task\n• /newsession — Reset conversation context\n• /sessions — View session history\n• /resume <n> — Resume a previous session\n• /model [opus|sonnet|haiku] — Switch model\n\nSend me a message to get started.`;
+      const teamLine = isTeamLeader(AGENT_ID) ? '\n• /team — Team leader commands (status, assign, meeting)' : '';
+      const greeting = cfg.greeting || `${cfg.statusEmoji} *${AGENT_ID} Online*\n\nCommands:\n• /status — Agent status\n• /stop — Stop current task\n• /newsession — Reset conversation context\n• /sessions — View session history\n• /resume <n> — Resume a previous session\n• /model [opus|sonnet|haiku] — Switch model${teamLine}\n\nSend me a message to get started.`;
       bot.sendMessage(chatId, greeting, { parse_mode: 'Markdown' });
       return;
     }
