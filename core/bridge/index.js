@@ -13,6 +13,21 @@
  * - Subagent spawning
  * - Media handling
  * - Session persistence
+ *
+ * v1.15.0 "Prometheus" — Claude Code architecture integration:
+ * - Tool Registry (structured tool definitions with permissions)
+ * - Command Registry (slash command framework)
+ * - Hook System (lifecycle pre/post hooks)
+ * - Smart Memory Recall (AI-powered context selection)
+ * - Feature Flags (conditional feature loading)
+ * - Echo Dedup (message deduplication)
+ *
+ * v1.16.0 "Titan" — All Claude models online + Mac Mini compute tools:
+ * - Direct Anthropic SDK client (Opus/Sonnet/Haiku, streaming, tool use)
+ * - Smart Model Router (complexity-based routing, fallback chain)
+ * - Compute Tools (Mac Mini as registered tools: Whisper, FFmpeg, Flutter, etc.)
+ * - Cost tracking, rate limit downshift, provider health monitoring
+ * - Ollama fallback (local + Mac Mini M1)
  */
 
 import fs from 'fs';
@@ -31,9 +46,17 @@ import { getProxyMode, setProxyMode, resolveProxyModel, getProxiedAgents } from 
 import os from 'os';
 import paths from '../shared/paths.js';
 
+// ── Claude Code Architecture Modules (v1.15.0) ───────────────────────────
+import { getEngine } from '../shared/claude-engine.js';
+import { feature } from '../shared/feature-flags.js';
+import { HOOK_EVENTS } from '../shared/hooks.js';
+
 const CONFIG_PATH = paths.config;
 const SHARED_DIR = paths.shared;
 const CREDENTIALS_DIR = paths.credentials;
+
+// ── Claude Engine (v1.15.0) ────────────────────────────────────────────────
+const engine = getEngine();
 
 // ── State ──────────────────────────────────────────────────────────────────
 const bots = new Map();           // agentId → TelegramBot instance
@@ -61,6 +84,7 @@ async function loadConfigAsync() {
 // ── Session Restore ───────────────────────────────────────────────────────
 async function restoreSessionsFromDisk(config) {
   let restored = 0;
+  if (!config.agents) return restored;
   for (const agentId of Object.keys(config.agents)) {
     // Check multiple directories for session files
     const sessionDirs = [
@@ -331,7 +355,7 @@ function buildSystemPrompt(agentId) {
   return parts.join('\n\n---\n\n');
 }
 
-async function buildSystemPromptAsync(agentId) {
+async function buildSystemPromptAsync(agentId, userMessage = null) {
   const config = await loadConfigAsync();
   const agent = config.agents[agentId];
   const parts = [];
@@ -356,15 +380,41 @@ async function buildSystemPromptAsync(agentId) {
   const toolsContent = await tryRead(paths.agentTools(agentId));
   if (toolsContent) parts.push(toolsContent);
 
-  const memoryMd = await tryRead(paths.agentMemoryMd(agentId));
-  if (memoryMd) parts.push('# Long-term Memory\n' + memoryMd.slice(0, 3000));
+  // v1.15.0: Smart Memory Recall — AI-powered context selection
+  if (feature('SMART_MEMORY_RECALL') && userMessage) {
+    try {
+      const memorySection = await engine.buildMemoryPrompt(agentId, userMessage);
+      if (memorySection) parts.push(memorySection);
+    } catch (err) {
+      console.error(`[${agentId}] Smart recall failed, falling back to flat memory:`, err.message);
+      // Fallback to legacy memory loading below
+      const memoryMd = await tryRead(paths.agentMemoryMd(agentId));
+      if (memoryMd) parts.push('# Long-term Memory\n' + memoryMd.slice(0, 3000));
 
-  const todayMem = await tryRead(getTodayMemoryPath(agentId));
-  if (todayMem) parts.push(`# Today's Memory (${new Date().toISOString().slice(0, 10)})\n` + todayMem.slice(-2000));
+      const todayMem = await tryRead(getTodayMemoryPath(agentId));
+      if (todayMem) parts.push(`# Today's Memory (${new Date().toISOString().slice(0, 10)})\n` + todayMem.slice(-2000));
 
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const yestMem = await tryRead(path.join(getMemoryDir(agentId), `${yesterday}.md`));
-  if (yestMem) parts.push(`# Yesterday's Memory (${yesterday})\n` + yestMem.slice(-1000));
+      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      const yestMem = await tryRead(path.join(getMemoryDir(agentId), `${yesterday}.md`));
+      if (yestMem) parts.push(`# Yesterday's Memory (${yesterday})\n` + yestMem.slice(-1000));
+    }
+  } else {
+    // Legacy memory loading
+    const memoryMd = await tryRead(paths.agentMemoryMd(agentId));
+    if (memoryMd) parts.push('# Long-term Memory\n' + memoryMd.slice(0, 3000));
+
+    const todayMem = await tryRead(getTodayMemoryPath(agentId));
+    if (todayMem) parts.push(`# Today's Memory (${new Date().toISOString().slice(0, 10)})\n` + todayMem.slice(-2000));
+
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const yestMem = await tryRead(path.join(getMemoryDir(agentId), `${yesterday}.md`));
+    if (yestMem) parts.push(`# Yesterday's Memory (${yesterday})\n` + yestMem.slice(-1000));
+  }
+
+  // v1.15.0: Tool registry prompt section
+  if (feature('TOOL_REGISTRY')) {
+    parts.push(engine.tools.toPromptSection());
+  }
 
   if (config.tools?.agentToAgent?.enabled) {
     const agentList = Object.keys(config.agents).filter(id => id !== agentId).join(', ');
@@ -396,7 +446,7 @@ async function callClaude(agentId, chatId, message, mediaPath = null, traceId = 
 async function callOpenAICompatible(agentId, chatId, message, mc, config, mediaPath = null, trace = null) {
   const sessionKey = getSessionKey(agentId, chatId);
   const log = tracedLogger(trace || createTrace('bridge', 'openai-compat'));
-  const systemPrompt = await buildSystemPromptAsync(agentId);
+  const systemPrompt = await buildSystemPromptAsync(agentId, message);
 
   let userMessage = message;
   if (mediaPath) {
@@ -597,6 +647,50 @@ function detectPermissionBlock(responseText) {
 }
 
 /**
+ * Translate raw API/CLI error messages into user-friendly Telegram messages.
+ * Keeps the raw error in server logs but sends a clean message to users.
+ */
+function friendlyError(rawMsg) {
+  const lower = rawMsg.toLowerCase();
+
+  // Billing / usage limits
+  if (lower.includes('out of extra usage') || lower.includes('out of credit') ||
+      lower.includes('insufficient_quota') || lower.includes('billing') ||
+      (lower.includes('usage') && lower.includes('add more'))) {
+    return '⚠️ API credits exhausted — the Anthropic workspace is out of usage. Ask your admin to add more credits at console.anthropic.com → Billing.';
+  }
+
+  // Rate limiting
+  if (lower.includes('rate_limit') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
+    return '⏳ Rate limited — too many requests. Try again in a minute.';
+  }
+
+  // Auth errors
+  if (lower.includes('authentication') || lower.includes('invalid.*api.*key') || lower.includes('unauthorized') || lower.includes('401')) {
+    return '🔑 Authentication error — API key may be invalid or expired. Check your credentials.';
+  }
+
+  // Overloaded
+  if (lower.includes('overloaded') || lower.includes('503') || lower.includes('service unavailable')) {
+    return '🔄 Claude API is temporarily overloaded. Try again in a moment.';
+  }
+
+  // Model not found
+  if (lower.includes('model_not_found') || lower.includes('does not exist')) {
+    return '❌ Model not available — the requested model may not be enabled for your account.';
+  }
+
+  // Context length
+  if (lower.includes('context_length') || lower.includes('too long') || lower.includes('max.*token')) {
+    return '📏 Message too long — exceeded the model\'s context window. Try a shorter message or start a new session.';
+  }
+
+  // Default: truncate but clean up raw JSON noise
+  const cleaned = rawMsg.replace(/\{[^}]*"request_id"[^}]*\}/g, '').trim();
+  return `⚠️ ${cleaned.slice(0, 180)}`;
+}
+
+/**
  * Call Claude via the Claude CLI (original path).
  */
 async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = null, trace = null, streamCtx = null) {
@@ -612,7 +706,8 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
   }
 
   // Build system prompt and write to temp file (avoids arg length issues)
-  const systemPrompt = await buildSystemPromptAsync(agentId);
+  // v1.15.0: Pass user message for smart memory recall context
+  const systemPrompt = await buildSystemPromptAsync(agentId, message);
   const tmpDir = paths.tmp;
   await ensureDir(tmpDir);
   const systemPromptFile = path.join(tmpDir, `claude-agent-${agentId}-system.md`);
@@ -675,11 +770,21 @@ async function callClaudeCLI(agentId, chatId, message, mc, config, mediaPath = n
     return null;
   }
 
-  // Build allowed tools
+  // Build allowed tools — v1.15.0: use Tool Registry when available
   const agentConf = config.agents[agentId] || {};
-  const configAllowed = agentConf.allowedTools || config.defaults?.allowedTools || [];
-  const runtimeApproved = [...getApprovedTools(agentId)];
-  const allAllowed = [...new Set([...configAllowed, ...runtimeApproved])];
+  let allAllowed;
+  if (feature('TOOL_REGISTRY')) {
+    // Tool Registry provides structured tool pool + config overrides + runtime approvals
+    const registryTools = engine.getToolsForAgent(agentId);
+    const runtimeApproved = [...getApprovedTools(agentId)];
+    const configAllowed = agentConf.allowedTools || config.defaults?.allowedTools || [];
+    allAllowed = [...new Set([...registryTools, ...configAllowed, ...runtimeApproved])];
+  } else {
+    // Legacy: flat string lists
+    const configAllowed = agentConf.allowedTools || config.defaults?.allowedTools || [];
+    const runtimeApproved = [...getApprovedTools(agentId)];
+    allAllowed = [...new Set([...configAllowed, ...runtimeApproved])];
+  }
 
   function spawnClaude(promptText, extraArgs = []) {
     const args = [
@@ -1119,6 +1224,12 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
   const debounceMs = config.telegram?.debounceMs || 2000;
   const msgTraceId = traceId || newTraceId();
 
+  // v1.15.0: Echo dedup check — skip duplicate content in same chat
+  if (feature('ECHO_DEDUP') && engine.dedup.isDuplicate(message, key)) {
+    console.log(`[${agentId}] Echo dedup: skipping duplicate message in chat ${chatId}`);
+    return;
+  }
+
   if (!messageBuffers.has(key)) {
     messageBuffers.set(key, { messages: [], timer: null, mediaPath: null });
   }
@@ -1133,6 +1244,18 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
     const combined = buffer.messages.join('\n');
     const media = buffer.mediaPath;
     messageBuffers.delete(key);
+
+    // v1.15.0: Fire before-message hook
+    if (feature('HOOK_SYSTEM')) {
+      const hookResult = await engine.hooks.emit(HOOK_EVENTS.BEFORE_MESSAGE, {
+        agentId, chatId, text: combined, mediaPath: media,
+      });
+      if (hookResult.blocked) {
+        console.log(`[${agentId}] Hook blocked message: ${hookResult.reason}`);
+        await bot.sendMessage(chatId, `⚠️ Message blocked: ${hookResult.reason}`);
+        return;
+      }
+    }
 
     try { await bot.sendChatAction(chatId, 'typing'); } catch {}
 
@@ -1241,7 +1364,7 @@ function debounceMessage(agentId, chatId, message, bot, mediaPath = null, traceI
         );
       } else {
         console.error(`[${agentId}] Error:`, err.message);
-        await bot.sendMessage(chatId, `Error: ${err.message.slice(0, 200)}`);
+        await bot.sendMessage(chatId, friendlyError(err.message));
       }
     }
   }, debounceMs);
@@ -1416,9 +1539,58 @@ function startBot(agentId, agentConfig, config) {
 
     if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.video && !msg.audio && !msg.video_note) return;
 
-    // Handle commands
+    // Handle commands — v1.15.0: Command Registry + legacy fallbacks
     if (msg.text) {
-      // /start command
+      // Engine-based command processing (when COMMAND_REGISTRY feature is enabled)
+      if (feature('COMMAND_REGISTRY') && engine.commands.isCommand(msg.text)) {
+        try {
+          const cmdResult = await engine.commands.execute(msg.text, {
+            agentId: targetAgent,
+            chatId: msg.chat.id,
+            bot,
+            config: loadConfig(),
+            session: sessions.get(getSessionKey(targetAgent, msg.chat.id)),
+          });
+
+          if (cmdResult.handled) {
+            const result = cmdResult.result || {};
+            const error = cmdResult.error;
+
+            // Handle action-based results from commands
+            if (result.action === 'clear_session') {
+              const sk = getSessionKey(targetAgent, msg.chat.id);
+              sessions.delete(sk);
+            } else if (result.action === 'stop_active_call') {
+              const sk = getSessionKey(targetAgent, msg.chat.id);
+              const proc = activeCalls.get(sk);
+              if (proc) {
+                proc.kill('SIGTERM');
+                setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+                activeCalls.delete(sk);
+                result.text = `Stopped *${targetAgent}*.`;
+              } else {
+                result.text = `No active task for *${targetAgent}*.`;
+              }
+            } else if (result.action === 'set_model') {
+              // Model switching handled via config update
+              result.text = result.text || `Model set to ${result.model}`;
+            }
+
+            // Send response
+            const responseText = error || result.text;
+            if (responseText) {
+              await bot.sendMessage(msg.chat.id, responseText, { parse_mode: 'Markdown' });
+            }
+            return;
+          }
+        } catch (cmdErr) {
+          console.error(`[${targetAgent}] Command error:`, cmdErr.message);
+        }
+      }
+
+      // ── Legacy commands (not in registry, kept for backwards compat) ──
+
+      // /start command (custom per-agent, needs shared bot logic)
       if (msg.text.startsWith('/start')) {
         const agentListStr = isShared
           ? `Available agents: ${[...bot._sharedAgents].join(', ')}\nUse /switch <agent> to change.`
@@ -1428,19 +1600,6 @@ function startBot(agentId, agentConfig, config) {
           { parse_mode: 'Markdown' }
         );
         savePairing(targetAgent, msg.from.id, msg.from.username);
-        return;
-      }
-
-      // /help command
-      if (msg.text === '/help') {
-        await bot.sendMessage(msg.chat.id,
-          `*${targetAgent}* — Commands\n\n` +
-          `/help — Show this help\n` +
-          `/status — System status\n` +
-          `/agents — List all agents\n\n` +
-          `Just send a message to talk to me. I can handle text, photos, voice notes, documents, and video.`,
-          { parse_mode: 'Markdown' }
-        );
         return;
       }
 
@@ -1462,20 +1621,6 @@ function startBot(agentId, agentConfig, config) {
         const config2 = loadConfig();
         const list = Object.keys(config2.agents).join('\n• ');
         await bot.sendMessage(msg.chat.id, `Configured agents:\n• ${list}`);
-        return;
-      }
-
-      // /status command
-      if (msg.text === '/status') {
-        const uptime = Math.floor(process.uptime());
-        const botCount = bots.size;
-        const sessionCount = sessions.size;
-        const proxyMode = getProxyMode(targetAgent);
-        const proxyInfo = proxyMode === 2 ? 'Dynamic (haiku/opus)' : 'Original';
-        await bot.sendMessage(msg.chat.id,
-          `Agent: *${targetAgent}*\nProxy: ${proxyInfo}\nUptime: ${uptime}s\nActive bots: ${botCount}\nSessions: ${sessionCount}`,
-          { parse_mode: 'Markdown' }
-        );
         return;
       }
 
@@ -1843,14 +1988,23 @@ const bridgeInterface = {
 // ── Main ───────────────────────────────────────────────────────────────────
 async function main() {
   console.log('╔══════════════════════════════════════════╗');
-  console.log('║   Claude Agents Bridge v2.1              ║');
-  console.log('║   Async I/O + Tracing + Session Restore  ║');
+  console.log('║   Claude Agents Bridge v2.1 Prometheus   ║');
+  console.log('║   Claude Code Architecture Integration   ║');
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
 
-  auditEvent('startup', { version: '2.1' });
+  auditEvent('startup', { version: '2.1-prometheus' });
 
   const config = loadConfig();
+
+  // v1.15.0: Initialize Claude Engine (tool registry, commands, hooks, features, dedup)
+  try {
+    await engine.initialize(config);
+    console.log('[engine] ✅ Claude Engine v1.15.0 "Prometheus" active');
+    console.log(`[engine]    Features: ${Object.entries(engine.features.getAll()).filter(([,v]) => v.enabled).length}/${Object.keys(engine.features.getAll()).length} enabled`);
+  } catch (err) {
+    console.error('[engine] ⚠️ Engine init failed, running in legacy mode:', err.message);
+  }
 
   // Restore sessions from disk (survives restarts)
   await restoreSessionsFromDisk(config);
@@ -1861,7 +2015,7 @@ async function main() {
   startGateway(config);
 
   // Start bots
-  let agentsToStart = Object.entries(config.agents);
+  let agentsToStart = Object.entries(config.agents || {});
   if (singleAgent) {
     const id = singleAgent.split('=')[1];
     agentsToStart = agentsToStart.filter(([k]) => k === id);

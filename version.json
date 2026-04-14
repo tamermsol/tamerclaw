@@ -1,5 +1,35 @@
 {
-  "version": "1.14.0",
-  "codename": "TamerClaw",
-  "releasedAt": "2026-03-31"
+  "version": "1.17.1",
+  "codename": "Phoenix",
+  "releasedAt": "2026-04-14",
+  "changelog": "Friendly API error messages — billing limits, rate limits, auth errors now show clean user-facing messages instead of raw JSON dumps",
+  "modules": {
+    "new": [
+      "token-budget.js",
+      "extract-memories.js",
+      "session-compact.js",
+      "skills.js",
+      "coordinator-mode.js",
+      "reactive-store.js",
+      "task-framework.js"
+    ],
+    "updated": [
+      "claude-engine.js",
+      "feature-flags.js"
+    ]
+  },
+  "history": [
+    {
+      "version": "1.16.0",
+      "codename": "Titan",
+      "releasedAt": "2026-04-01",
+      "changelog": "All Claude models online + Mac Mini compute tools"
+    },
+    {
+      "version": "1.15.0",
+      "codename": "Prometheus",
+      "releasedAt": "2026-04-01",
+      "changelog": "Claude Code Architecture Integration — tool-registry, command-registry, hooks, smart-memory-recall, feature-flags, echo-dedup, claude-engine"
+    }
+  ]
 }

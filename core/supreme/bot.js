@@ -18,6 +18,26 @@ import { spawn, execSync } from 'child_process';
 import TelegramBot from 'node-telegram-bot-api';
 import paths from '../shared/paths.js';
 
+// ── Friendly Error Formatter ──────────────────────────────────────────────────
+function friendlyError(rawMsg) {
+  const lower = (rawMsg || '').toLowerCase();
+  if (lower.includes('out of extra usage') || lower.includes('out of credit') ||
+      lower.includes('insufficient_quota') || (lower.includes('usage') && lower.includes('add more'))) {
+    return '⚠️ API credits exhausted — the Anthropic workspace is out of usage. Add more credits at console.anthropic.com → Billing.';
+  }
+  if (lower.includes('rate_limit') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
+    return '⏳ Rate limited — too many requests. Try again in a minute.';
+  }
+  if (lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('401')) {
+    return '🔑 Authentication error — API key may be invalid or expired.';
+  }
+  if (lower.includes('overloaded') || lower.includes('503') || lower.includes('service unavailable')) {
+    return '🔄 Claude API is temporarily overloaded. Try again in a moment.';
+  }
+  const cleaned = (rawMsg || '').replace(/\{[^}]*"request_id"[^}]*\}/g, '').trim();
+  return `⚠️ ${cleaned.slice(0, 180)}`;
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 if (!fs.existsSync(paths.config)) {
   console.error(`[FATAL] Config not found: ${paths.config}`);
@@ -1080,7 +1100,7 @@ bot.on('message', async (msg) => {
       } else {
         console.error('[supreme] ❌', errMsg.slice(0, 300));
         errorCount++;
-        bot.sendMessage(chatId, `⚠️ Error: ${errMsg.slice(0, 200)}`).catch(() => {});
+        bot.sendMessage(chatId, friendlyError(errMsg)).catch(() => {});
       }
     } finally {
       try { fs.unlinkSync(PROCESSING_FILE); } catch {}

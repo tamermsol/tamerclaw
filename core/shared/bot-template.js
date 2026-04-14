@@ -29,6 +29,30 @@ import { archiveSession, formatSessionsList, getSessionByIndex, getSessionById }
 import { MeetingCommandHandler } from '../meetings/meeting-commands.js';
 import { createTeamCommands, getTeamLeaderPrompt, getTeamMemberPrompt, isTeamLeader } from './team-leader.js';
 
+// v1.15.0: Claude Code architecture modules
+import { feature } from './feature-flags.js';
+import { EchoDedup } from './echo-dedup.js';
+
+// ── Friendly Error Formatter ──────────────────────────────────────────────────
+function friendlyError(rawMsg) {
+  const lower = (rawMsg || '').toLowerCase();
+  if (lower.includes('out of extra usage') || lower.includes('out of credit') ||
+      lower.includes('insufficient_quota') || (lower.includes('usage') && lower.includes('add more'))) {
+    return '⚠️ API credits exhausted — the Anthropic workspace is out of usage. Add more credits at console.anthropic.com → Billing.';
+  }
+  if (lower.includes('rate_limit') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
+    return '⏳ Rate limited — too many requests. Try again in a minute.';
+  }
+  if (lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('401')) {
+    return '🔑 Authentication error — API key may be invalid or expired.';
+  }
+  if (lower.includes('overloaded') || lower.includes('503') || lower.includes('service unavailable')) {
+    return '🔄 Claude API is temporarily overloaded. Try again in a moment.';
+  }
+  const cleaned = (rawMsg || '').replace(/\{[^}]*"request_id"[^}]*\}/g, '').trim();
+  return `⚠️ ${cleaned.slice(0, 180)}`;
+}
+
 // ── Plugin Loader ──────────────────────────────────────────────────────────────
 const __shared_dir = path.dirname(new URL(import.meta.url).pathname);
 
@@ -180,6 +204,9 @@ export function createBot(config) {
   } catch (e) {
     console.error(`[${config.agentId}] Failed to load config.json:`, e.message);
   }
+
+  // v1.15.0: Per-bot echo dedup instance
+  const botDedup = new EchoDedup(500);
 
   // File config is lowest priority, then passed config overrides
   const cfg = {
@@ -1216,7 +1243,7 @@ ${CWD}
     } catch (err) {
       console.error(`[${AGENT_ID}] Error:`, err.message?.slice(0, 300));
       errorCount++;
-      bot.sendMessage(chatId, `Error: ${err.message?.slice(0, 200)}`).catch(() => {});
+      bot.sendMessage(chatId, friendlyError(err.message)).catch(() => {});
     } finally {
       try { fs.unlinkSync(PROCESSING_FILE); } catch {}
       processing = false;
