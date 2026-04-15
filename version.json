@@ -1,32 +1,46 @@
 {
-  "version": "1.18.0",
-  "codename": "Agency",
+  "version": "1.19.0",
+  "codename": "Nexus",
   "releasedAt": "2026-04-15",
-  "changelog": "Agency Powerup — ./tamerclaw powerup sets up a full software agency with CTO, CMO, and specialized agents. Includes 17 new shared modules, mobile store publishing pipeline, and Anthropic SDK integration.",
+  "changelog": "Full agency delegation infrastructure — 18 new shared modules (delegation-router, task-registry, team-discovery, coordinator, etc.), Mac Mini GUI automation, updated bridge/supreme with dynamic model routing, hardened inbox-watcher with phantom detection.",
   "modules": {
     "new": [
-      "anthropic-client.js",
-      "command-registry.js",
-      "compute-tools.js",
-      "echo-dedup.js",
-      "hooks.js",
-      "model-router.js",
-      "smart-memory-recall.js",
-      "tool-registry.js"
+      "delegation-router.js",
+      "coordinator.js",
+      "task-registry.js",
+      "task-checkin.js",
+      "team-discovery.js",
+      "teammate-mailbox.js",
+      "team-memory-sync.js",
+      "mini-meeting.js",
+      "smart-memory.js",
+      "store.js",
+      "gui-access.js",
+      "compute-router.js",
+      "account-ratelimit.js",
+      "loop-guard.js",
+      "auto-dream.js",
+      "dream-feature.js",
+      "magic-docs.js",
+      "compaction.js"
     ],
     "updated": [
-      "claude-engine.js",
-      "feature-flags.js",
-      "token-budget.js",
-      "extract-memories.js",
-      "session-compact.js",
-      "skills.js",
-      "coordinator-mode.js",
-      "reactive-store.js",
-      "task-framework.js"
+      "bridge/index.js",
+      "bridge/gateway.js",
+      "supreme/bot.js",
+      "inbox-watcher.js",
+      "GLOBAL_POLICY.md",
+      "compute/config.json",
+      "compute/watchdog.js"
     ]
   },
   "history": [
+    {
+      "version": "1.18.0",
+      "codename": "Agency",
+      "releasedAt": "2026-04-15",
+      "changelog": "Agency Powerup — ./tamerclaw powerup sets up a full software agency with CTO, CMO, and specialized agents. Includes 17 new shared modules, mobile store publishing pipeline, and Anthropic SDK integration."
+    },
     {
       "version": "1.17.1",
       "codename": "Phoenix",
@@ -38,12 +52,6 @@
       "codename": "Titan",
       "releasedAt": "2026-04-01",
       "changelog": "All Claude models online + Mac Mini compute tools"
-    },
-    {
-      "version": "1.15.0",
-      "codename": "Prometheus",
-      "releasedAt": "2026-04-01",
-      "changelog": "Claude Code Architecture Integration — tool-registry, command-registry, hooks, smart-memory-recall, feature-flags, echo-dedup, claude-engine"
     }
   ]
 }
