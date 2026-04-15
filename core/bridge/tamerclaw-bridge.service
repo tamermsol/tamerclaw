@@ -1,0 +1,48 @@
+# TamerClaw Bridge — systemd service template
+#
+# This service runs the Telegram bridge that connects agents to Telegram.
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/tamerclaw-bridge.service
+#   2. Edit the paths below to match your $TAMERCLAW_HOME
+#   3. Run: systemctl daemon-reload
+#   4. Run: systemctl enable --now tamerclaw-bridge
+#
+# Configuration:
+#   - Set WorkingDirectory to your bridge directory
+#   - Set ExecStart to point to your bridge entry point
+#   - Adjust User if not running as root
+#   - Set TAMERCLAW_HOME environment variable
+
+[Unit]
+Description=TamerClaw Agent Bridge
+After=network.target
+
+[Service]
+Type=simple
+
+# CONFIGURE: Set these paths to your installation
+WorkingDirectory=$TAMERCLAW_HOME/core/bridge
+ExecStart=/usr/bin/node index.js
+
+# Process management
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=NODE_ENV=production
+Environment=TAMERCLAW_HOME=$TAMERCLAW_HOME
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tamerclaw-bridge
+
+# Optional: Run as a specific user (uncomment and modify)
+# User=tamerclaw
+# Group=tamerclaw
+
+[Install]
+WantedBy=multi-user.target

@@ -47,28 +47,19 @@ if (!fs.existsSync(paths.config)) {
 const config = JSON.parse(fs.readFileSync(paths.config, 'utf-8'));
 const TOKEN = config.agents?.supreme?.botToken || '';
 const AGENT_ID = 'supreme';
-const SUPREME_CODE_DIR = paths.supreme;          // core/supreme (code only)
-const SUPREME_RUNTIME = paths.supremeRuntime;     // user/agents/supreme (runtime state)
-const AGENT_DIR = paths.agentDir('supreme');
-const AGENTS_DIR = paths.agents;
-const SHARED_DIR = paths.shared;
+const SUPREME_DIR = paths.supreme;          // core/supreme (code only)
+const AGENT_DIR = paths.agentDir(AGENT_ID); // user/agents/supreme (runtime data)
+const AGENTS_DIR = paths.agents;            // user/agents/
+const SHARED_DIR = paths.shared;            // core/shared/
 const CONFIG_PATH = paths.config;
-const CWD = paths.home;  // Supreme works from the root of the system
+const CWD = paths.home;                     // Supreme works from the TAMERCLAW_HOME root
 
 const CREDENTIALS_DIR = paths.credentials;
-
-// ── Token check ──────────────────────────────────────────────────────────────
-if (!TOKEN) {
-  console.error('No bot token for supreme agent. Run: tamerclaw init');
-  process.exit(1);
-}
-
-// Runtime state files live under user/agents/supreme/ for workspace isolation
-const INBOX = path.join(SUPREME_RUNTIME, 'inbox.jsonl');
-const OUTBOX_DIR = path.join(SUPREME_RUNTIME, 'outbox');
-const PROCESSED = path.join(SUPREME_RUNTIME, 'processed.txt');
-const PROCESSING_FILE = path.join(SUPREME_RUNTIME, 'processing.json');
-const HEALTH_FILE = path.join(SUPREME_RUNTIME, 'health.json');
+const INBOX = path.join(SUPREME_DIR, 'inbox.jsonl');
+const OUTBOX_DIR = path.join(SUPREME_DIR, 'outbox');
+const PROCESSED = path.join(SUPREME_DIR, 'processed.txt');
+const PROCESSING_FILE = path.join(SUPREME_DIR, 'processing.json');
+const HEALTH_FILE = path.join(SUPREME_DIR, 'health.json');
 
 // Ensure dirs
 for (const dir of [OUTBOX_DIR]) {
@@ -77,7 +68,7 @@ for (const dir of [OUTBOX_DIR]) {
 
 // ── Singleton Guard ──────────────────────────────────────────────────────────
 // Kill any OTHER supreme bot.js processes (not relay, not us) to prevent 409.
-const LOCK_FILE = path.join(SUPREME_RUNTIME, 'bot.lock');
+const LOCK_FILE = path.join(SUPREME_DIR, 'bot.lock');
 try {
   // Check if a previous supreme bot.js is still running via lock file
   if (fs.existsSync(LOCK_FILE)) {
@@ -112,6 +103,27 @@ let stopRequested = false;
 let callCount = 0;
 let errorCount = 0;
 let processing = false;
+
+// ── Usage Tracking ──────────────────────────────────────────────────────────
+const USAGE_FILE = path.join(SUPREME_DIR, 'usage.json');
+let sessionUsage = {
+  totalInputTokens: 0, totalOutputTokens: 0,
+  totalCacheRead: 0, totalCacheCreation: 0,
+  totalCalls: 0, sessionStart: Date.now(), lastCallTime: null
+};
+try {
+  if (fs.existsSync(USAGE_FILE)) {
+    const saved = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf-8'));
+    const today = new Date().toISOString().slice(0, 10);
+    if (saved.date === today) Object.assign(sessionUsage, saved);
+  }
+} catch {}
+function saveUsage() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(USAGE_FILE, JSON.stringify({ ...sessionUsage, date: today }, null, 2));
+  } catch {}
+}
 
 // ── Allowlist ─────────────────────────────────────────────────────────────────
 function isUserAllowed(userId) {
@@ -245,10 +257,10 @@ ${new Date().toISOString().slice(0, 10)}
 
 ## CRITICAL: Self-Protection Rules
 - NEVER run: systemctl restart supreme-agent, systemctl stop supreme-agent, or kill commands targeting your own PID (${process.pid}) or bot.js processes
-- NEVER edit ${SUPREME_CODE_DIR}/bot.js — that is YOUR running code. Editing it triggers a restart loop.
-- NEVER modify the supreme-agent service file
-- If you need to fix the supreme agent itself, write the fix plan to ${SUPREME_RUNTIME}/outbox/ and tell the user to apply it manually
-- You CAN safely restart OTHER services (like the bridge)
+- NEVER edit ${SUPREME_DIR}/bot.js — that is YOUR running code. Editing it triggers a restart loop.
+- NEVER modify /etc/systemd/system/supreme-agent.service
+- If you need to fix the supreme agent itself, write the fix plan to ${SUPREME_DIR}/outbox/ and tell the user to apply it manually
+- You CAN safely restart OTHER services (like claude-agents.service for the bridge)
 
 ## Telegram Formatting
 - No markdown tables (use bullet lists)
@@ -323,18 +335,6 @@ function extractResultFromEvents(events) {
   return null;
 }
 
-/**
- * Extract stop_reason from stream-json events.
- * Returns 'max_turns' when the agent hit the turn limit.
- */
-function extractStopReason(events) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev.type === 'result' && ev.stop_reason) return ev.stop_reason;
-  }
-  return null;
-}
-
 // ── Claude CLI Execution (streaming with live Telegram updates) ───────────────
 
 function callClaude(message, chatId, mediaPath = null) {
@@ -348,15 +348,11 @@ function callClaude(message, chatId, mediaPath = null) {
 
     console.log(`[supreme] Processing: "${userMessage.slice(0, 100)}..."`);
 
-    const tmpDir = paths.tmp;
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const promptFile = path.join(tmpDir, 'claude-supreme-prompt.txt');
-    const sysFile = path.join(tmpDir, 'claude-supreme-sys.txt');
-    fs.writeFileSync(promptFile, userMessage);
-    fs.writeFileSync(sysFile, systemPrompt);
-
-    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
     const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+    const tools = 'Read Write Edit Bash Glob Grep Agent WebSearch WebFetch';
+
+    // Build args array directly — avoids shell expansion that broke --max-turns
+    // when system prompt contained backticks, $, or " characters
     const args = [
       '-p', userMessage,
       '--verbose',
@@ -449,6 +445,16 @@ function callClaude(message, chatId, mediaPath = null) {
         toolCount++;
         inToolPhase = true;
         maybeSendToolProgress();
+      }
+
+      // Track token usage from events
+      if (event.type === 'result' && event.usage) {
+        sessionUsage.totalInputTokens += event.usage.input_tokens || 0;
+        sessionUsage.totalOutputTokens += event.usage.output_tokens || 0;
+        sessionUsage.totalCacheRead += event.usage.cache_read_input_tokens || 0;
+        sessionUsage.totalCacheCreation += event.usage.cache_creation_input_tokens || 0;
+        sessionUsage.lastCallTime = Date.now();
+        saveUsage();
       }
 
       // Assistant message content blocks
@@ -704,84 +710,124 @@ function callClaude(message, chatId, mediaPath = null) {
       }
 
       // ── Auto-continue on max_turns (regardless of exit code) ──
-      const stopReason = hasStreamData ? extractStopReason(parsedEvents) : null;
-      // Detect max_turns from stream-json OR from raw text fallback
+      const stopReason = hasStreamData ? (parsedEvents.find(e => e.type === 'result')?.stop_reason) : null;
       const hitMaxTurns = stopReason === 'max_turns' ||
         rawStdout.includes('Reached max turns') || stderr.includes('Reached max turns') ||
         rawStdout.includes('max_turns') || (stderr || '').match(/Reached max turns\s*\(\d+\)/);
 
       if (hitMaxTurns) {
-        console.log('[supreme] Hit max_turns — auto-continuing...');
-        if (chatId) {
-          bot.sendMessage(chatId, '👑 Supreme hit turn limit — auto-continuing...').catch(() => {});
-        }
-        // Resume with a continue prompt using the same session
         const sessionId = parsedEvents.find(e => e.session_id)?.session_id || '';
-        if (!sessionId) {
-          console.error('[supreme] No session_id found in events — cannot auto-continue');
-          // Fall through to normal result handling
-        } else {
+        if (sessionId) {
+          console.log(`[supreme] Hit max_turns — auto-continuing session ${sessionId.slice(0, 8)}...`);
+          if (chatId) bot.sendMessage(chatId, '👑 Supreme hit turn limit — auto-continuing...').catch(() => {});
           const contArgs = [
             '-p', 'Continue where you left off. Complete the task.',
-            '--verbose',
-            '--output-format', 'stream-json',
-            '--max-turns', '500',
-            '--model', 'opus',
+            '--verbose', '--output-format', 'stream-json',
+            '--max-turns', '500', '--model', 'opus',
             '--allowedTools', tools,
             '--resume', sessionId,
-            '--append-system-prompt', systemPrompt
+            '--append-system-prompt', args.find((a, i) => args[i - 1] === '--system-prompt' || args[i - 1] === '--append-system-prompt') || ''
           ];
           const contProc = spawn(CLAUDE_BIN, contArgs, { cwd: CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
-        activeProcess = contProc;
+          activeProcess = contProc;
+          let contRaw = '', contErr = '';
+          let contStreamText = '';
+          let contStreamMsgId = null;
+          let contLastUpdate = 0;
+          let contLineBuffer = '';
 
-        let contRaw = '';
-        let contErr = '';
-        const contEvents = [];
-        let contLineBuffer = '';
-
-        contProc.stdout.on('data', (d) => {
-          const chunk = d.toString();
-          contRaw += chunk;
-          contLineBuffer += chunk;
-          const lines = contLineBuffer.split('\n');
-          contLineBuffer = lines.pop();
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try { contEvents.push(JSON.parse(line)); } catch {}
-          }
-        });
-        contProc.stderr.on('data', (d) => { contErr += d.toString(); });
-
-        contProc.on('close', async (rc) => {
-          activeProcess = null;
-          if (contLineBuffer.trim()) {
-            try { contEvents.push(JSON.parse(contLineBuffer)); } catch {}
+          function processContLine(line) {
+            if (!line.trim()) return;
+            try {
+              const event = JSON.parse(line);
+              if (event.type === 'assistant' && event.message?.content) {
+                for (const block of event.message.content) {
+                  if (block.type === 'text' && block.text) contStreamText += block.text;
+                }
+              }
+              if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta?.text) {
+                contStreamText += event.delta.text;
+              }
+            } catch {}
           }
 
-          let contResponse = extractResultFromEvents(contEvents);
-          if (!contResponse && contRaw.trim()) contResponse = contRaw.trim();
+          function processContChunk(chunk) {
+            contRaw += chunk;
+            contLineBuffer += chunk;
+            const lines = contLineBuffer.split('\n');
+            contLineBuffer = lines.pop();
+            for (const line of lines) processContLine(line);
 
-          const finalResponse = contResponse || response;
-          if (rc === 0 && finalResponse) {
-            console.log(`[supreme] ✅ Continuation completed: ${finalResponse.length} chars`);
-            appendDailyMemory(userMessage, finalResponse.length);
-            if (progressMessageId) {
-              try { await bot.deleteMessage(chatId, progressMessageId); } catch {}
+            // Live stream to Telegram (throttled to 1.5s)
+            const now = Date.now();
+            if (contStreamText.length > 0 && (now - contLastUpdate > 1500)) {
+              contLastUpdate = now;
+              const displayText = contStreamText.length > 3800
+                ? contStreamText.slice(0, 3800) + ' ▌'
+                : contStreamText + ' ▌';
+              if (!contStreamMsgId) {
+                bot.sendMessage(chatId, displayText, { parse_mode: 'Markdown' }).catch(() =>
+                  bot.sendMessage(chatId, displayText)
+                ).then(sent => {
+                  if (sent?.message_id) contStreamMsgId = sent.message_id;
+                }).catch(() => {});
+              } else {
+                telegramEditSafe(chatId, contStreamMsgId, displayText);
+              }
             }
-            sendLongMessage(chatId, finalResponse);
-            resolve({ text: finalResponse, streamed: false });
-          } else {
-            console.error(`[supreme] Continuation failed (code ${rc}): ${contErr.slice(0, 200)}`);
-            if (response) {
-              sendLongMessage(chatId, response);
-              resolve({ text: response, streamed: false });
+          }
+
+          contProc.stdout.on('data', (d) => { processContChunk(d.toString()); });
+          contProc.stderr.on('data', (d) => { contErr += d.toString(); });
+          contProc.on('close', async (rc) => {
+            activeProcess = null;
+            // Process remaining buffer
+            if (contLineBuffer.trim()) processContLine(contLineBuffer);
+
+            // Try structured extraction as backup
+            let contResponse = null;
+            try {
+              const events = contRaw.trim().split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+              contResponse = events.filter(e => e.type === 'result').map(e =>
+                (e.result || []).filter(b => b.type === 'text').map(b => b.text).join('')
+              ).join('') || events.filter(e => e.type === 'assistant').map(e =>
+                (e.message?.content || []).filter(b => b.type === 'text').map(b => b.text).join('')
+              ).join('\n\n');
+            } catch {}
+
+            // NEVER fall back to raw JSON — use streamed text, parsed result, or original response
+            const finalResp = contStreamText.trim() || contResponse || response;
+            if (finalResp) {
+              console.log(`[supreme] ✅ Continuation: ${finalResp.length} chars`);
+              appendDailyMemory(userMessage, finalResp.length);
+              if (contStreamMsgId) {
+                const chunks = [];
+                let rem = finalResp;
+                while (rem.length > 0) {
+                  let splitAt = rem.length > 4000 ? (rem.lastIndexOf('\n\n', 4000) > 1200 ? rem.lastIndexOf('\n\n', 4000) : 4000) : rem.length;
+                  chunks.push(rem.slice(0, splitAt));
+                  rem = rem.slice(splitAt).trimStart();
+                }
+                await telegramEditSafe(chatId, contStreamMsgId, chunks[0]);
+                for (let i = 1; i < chunks.length; i++) {
+                  await bot.sendMessage(chatId, chunks[i], { parse_mode: 'Markdown' }).catch(() =>
+                    bot.sendMessage(chatId, chunks[i]).catch(() => {})
+                  );
+                }
+              } else {
+                sendLongMessage(chatId, finalResp);
+              }
+              resolve({ text: finalResp, streamed: !!contStreamMsgId });
             } else {
-              reject(new Error(`Supreme hit turn limit and continuation failed: ${contErr.slice(0, 200)}`));
+              if (response) {
+                resolve({ text: response, streamed: streamedAnyText });
+              } else {
+                reject(new Error(`Continuation failed: ${contErr.slice(0, 200)}`));
+              }
             }
-          }
-        });
+          });
           return;
-        } // end else (sessionId found)
+        }
       }
 
       if (code === 0 && response) {
@@ -945,17 +991,6 @@ bot.on('message', async (msg) => {
 
   console.log(`📩 ${username}: ${(msg.text || '[media]').slice(0, 80)}`);
 
-  // Persist chat ID for update notifications (in case allowlist is empty)
-  try {
-    const lastChatsFile = path.join(SUPREME_RUNTIME, 'last-chat-ids.json');
-    let knownChats = new Set();
-    if (fs.existsSync(lastChatsFile)) {
-      try { knownChats = new Set(JSON.parse(fs.readFileSync(lastChatsFile, 'utf-8'))); } catch {}
-    }
-    knownChats.add(String(chatId));
-    fs.writeFileSync(lastChatsFile, JSON.stringify([...knownChats]));
-  } catch {}
-
   // Allowlist check
   if (!isUserAllowed(userId)) {
     console.log(`🚫 Blocked message from ${userId} (not in supreme allowlist)`);
@@ -994,28 +1029,78 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Handle /help
-  if (msg.text === '/help') {
-    bot.sendMessage(chatId,
-      '👑 *Supreme Agent — Commands*\n\n' +
-      '/help — Show this help\n' +
-      '/status — System status (uptime, memory, call count)\n' +
-      '/agents — List all managed agents\n' +
-      '/stop — Cancel current running task\n\n' +
-      'Just send a message to give me a task. I can:\n' +
-      '• Manage and configure all agents\n' +
-      '• Fix bugs, create new agents\n' +
-      '• Run shell commands, edit files\n' +
-      '• Accept text, photos, voice notes, documents',
-      { parse_mode: 'Markdown' }
-    );
+  // Handle /switch <account>
+  if (msg.text?.startsWith('/switch')) {
+    const target = msg.text.split(/\s+/)[1]; // meetings or design
+    if (!target || !['meetings', 'design', 'tony', 'hadeel', 'resume'].includes(target)) {
+      bot.sendMessage(chatId, '⚡ *Account Switch*\n\nUsage:\n`/switch meetings` — Meetings account\n`/switch design` — Design account\n`/switch tony` — Tony account\n`/switch hadeel` — Hadeel account\n`/switch resume` — Cascade restart all agents', { parse_mode: 'Markdown' });
+      return;
+    }
+    if (target === 'resume') {
+      bot.sendMessage(chatId, '🔄 Resuming all agents (cascade: C-Level → Teams)...', { parse_mode: 'Markdown' });
+      try {
+        const result = execSync(`${CWD}/account-switcher.sh resume 2>&1`, { timeout: 120000 }).toString();
+        bot.sendMessage(chatId, `✅ *All agents resumed*\n\n\`\`\`\n${result}\n\`\`\``, { parse_mode: 'Markdown' });
+      } catch (err) {
+        bot.sendMessage(chatId, `❌ Resume failed: ${err.message?.slice(0, 300)}`);
+      }
+      return;
+    }
+    bot.sendMessage(chatId, `🔄 Switching to *${target}@msol.dev*...`, { parse_mode: 'Markdown' });
+    try {
+      const result = execSync(`${CWD}/account-switcher.sh ${target} 2>&1`, { timeout: 60000 }).toString();
+      bot.sendMessage(chatId, `✅ *Switched to ${target}@msol.dev*\n\n\`\`\`\n${result}\n\`\`\`\n\n⚠️ Supreme Agent will restart momentarily.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Switch failed: ${err.message?.slice(0, 200)}`);
+    }
     return;
   }
+
+  // Handle /account — show current active account
+  if (msg.text === '/account') {
+    try {
+      const result = execSync(`${CWD}/account-switcher.sh status 2>&1`).toString();
+      bot.sendMessage(chatId, `👑 *Account Status*\n\n\`\`\`\n${result}\n\`\`\``, { parse_mode: 'Markdown' });
+    } catch (err) {
+      bot.sendMessage(chatId, `Error: ${err.message?.slice(0, 200)}`);
+    }
+    return;
+  }
+
+  // Handle /usage — show rate limit and consumption info (reads real CLI session data)
+  if (msg.text === '/usage') {
+    try {
+      let cliData = '';
+      try {
+        cliData = execSync(`node ${SHARED_DIR}/cli-usage-report.js --format text`, {
+          timeout: 15000, encoding: 'utf-8'
+        }).trim();
+      } catch (e) {
+        cliData = '⚠️ CLI usage data unavailable';
+      }
+
+      // Append bot-specific session info
+      const uptimeSecs = Math.floor((Date.now() - sessionUsage.sessionStart) / 1000);
+      const h = Math.floor(uptimeSecs / 3600), m = Math.floor((uptimeSecs % 3600) / 60);
+      const uptimeStr = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+
+      const extra = `\n\n*Supreme Bot Session:*\n` +
+        `• Calls: ${callCount}\n` +
+        `• Uptime: ${uptimeStr}` +
+        (sessionUsage.lastCallTime ? `\n• Last call: ${new Date(sessionUsage.lastCallTime).toLocaleTimeString()}` : '');
+
+      bot.sendMessage(chatId, cliData + extra, { parse_mode: 'Markdown' });
+    } catch (err) {
+      bot.sendMessage(chatId, '❌ Usage check failed: ' + (err.message || '').slice(0, 200));
+    }
+    return;
+  }
+
 
   // Handle /start
   if (msg.text?.startsWith('/start')) {
     bot.sendMessage(chatId,
-      '👑 *Supreme Agent Online*\n\nI am the master controller of the TamerClaw ecosystem.\n\nType /help for commands, or just tell me what you need.',
+      '👑 *Supreme Agent Online*\n\nI am the master controller of the claude-agents ecosystem.\n\nCommands:\n• /status — System status\n• /agents — List all agents\n• /account — Current Claude account\n• /switch meetings|design|tony|hadeel|resume — Switch Claude account\n• /usage — Token usage & rate limits\n• /stop — Stop current task\n\nOr just tell me what you need.',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -1033,15 +1118,8 @@ bot.on('message', async (msg) => {
     if (msg.document.file_name) text = `[File: ${msg.document.file_name}]\n${text}`;
   } else if (msg.voice) {
     mediaPath = await downloadMedia(msg.voice.file_id);
-    if (!text) text = '[Voice message]';
   } else if (msg.video) {
     mediaPath = await downloadMedia(msg.video.file_id);
-  } else if (msg.audio) {
-    mediaPath = await downloadMedia(msg.audio.file_id);
-    if (msg.audio.title) text = `[Audio: ${msg.audio.title}]\n${text}`;
-  } else if (msg.video_note) {
-    mediaPath = await downloadMedia(msg.video_note.file_id);
-    if (!text) text = '[Video note]';
   }
 
   if (!text && !mediaPath) return;
@@ -1085,23 +1163,9 @@ bot.on('message', async (msg) => {
       }
       callCount++;
     } catch (err) {
-      const errMsg = err.message || '';
-      // Filter out non-fatal CLI warnings (stdin, deprecation notices, etc.)
-      const nonFatalPatterns = [
-        /no stdin data received/i,
-        /redirect stdin explicitly/i,
-        /When using --print/i,
-        /--output-format/i,
-        /proceeding without it/i
-      ];
-      const isNonFatal = nonFatalPatterns.some(p => p.test(errMsg));
-      if (isNonFatal) {
-        console.log('[supreme] Suppressed non-fatal CLI warning:', errMsg.slice(0, 150));
-      } else {
-        console.error('[supreme] ❌', errMsg.slice(0, 300));
-        errorCount++;
-        bot.sendMessage(chatId, friendlyError(errMsg)).catch(() => {});
-      }
+      console.error('[supreme] ❌', err.message?.slice(0, 300));
+      errorCount++;
+      bot.sendMessage(chatId, `⚠️ Error: ${err.message?.slice(0, 200)}`).catch(() => {});
     } finally {
       try { fs.unlinkSync(PROCESSING_FILE); } catch {}
       processing = false;
@@ -1153,94 +1217,6 @@ function writeHealth() {
 
 setInterval(writeHealth, 60000);
 writeHealth();
-
-// ── Update Announcement ──────────────────────────────────────────────────────
-// After ./tamerclaw update, the CLI writes update-notify.json to the runtime dir.
-// On startup, we check for it and announce the update to all allowed users.
-(async function announceUpdateIfNeeded() {
-  const notifyFile = path.join(SUPREME_RUNTIME, 'update-notify.json');
-  try {
-    if (!fs.existsSync(notifyFile)) return;
-
-    const notify = JSON.parse(fs.readFileSync(notifyFile, 'utf-8'));
-    // Delete immediately to prevent re-announcing on next restart
-    fs.unlinkSync(notifyFile);
-
-    const { oldVersion, newVersion, commits, timestamp } = notify;
-    if (!newVersion) return;
-
-    // Build the announcement message
-    let msg = `🔄 *TamerClaw Updated*\n\n`;
-    if (oldVersion && oldVersion !== newVersion) {
-      msg += `v${oldVersion} → v${newVersion}\n\n`;
-    } else {
-      msg += `v${newVersion}\n\n`;
-    }
-
-    if (commits && commits.length > 0) {
-      msg += `*What's new:*\n`;
-      for (const commit of commits.slice(0, 10)) {
-        // Clean up commit message — remove conventional commit prefix for readability
-        const cleaned = commit.replace(/^[a-f0-9]+ /, '• ');
-        msg += `${cleaned}\n`;
-      }
-    }
-
-    msg += `\n_Updated ${timestamp ? 'at ' + new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : 'just now'}_`;
-
-    // Determine who to notify — use allowlist (user IDs = chat IDs for private chats)
-    let chatIds = [];
-
-    // Try per-agent allowlist first, then default
-    for (const filename of ['telegram-supreme-allowFrom.json', 'telegram-default-allowFrom.json']) {
-      const allowPath = path.join(CREDENTIALS_DIR, filename);
-      if (fs.existsSync(allowPath)) {
-        try {
-          const allowlist = JSON.parse(fs.readFileSync(allowPath, 'utf-8'));
-          if (allowlist.users && Array.isArray(allowlist.users)) {
-            chatIds = allowlist.users.map(id => String(id));
-          }
-        } catch {}
-        break;
-      }
-    }
-
-    // Fallback: check for last-chat-ids.json (persisted from message interactions)
-    if (chatIds.length === 0) {
-      const lastChatsFile = path.join(SUPREME_RUNTIME, 'last-chat-ids.json');
-      if (fs.existsSync(lastChatsFile)) {
-        try {
-          chatIds = JSON.parse(fs.readFileSync(lastChatsFile, 'utf-8'));
-        } catch {}
-      }
-    }
-
-    if (chatIds.length === 0) {
-      console.log('[supreme] Update notification: no chat IDs to notify');
-      return;
-    }
-
-    // Small delay to let Telegram polling fully initialize
-    await new Promise(r => setTimeout(r, 3000));
-
-    for (const chatId of chatIds) {
-      try {
-        await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
-        console.log(`[supreme] Update announcement sent to ${chatId}`);
-      } catch (err) {
-        // Retry without markdown
-        try {
-          await bot.sendMessage(chatId, msg.replace(/[*_`]/g, ''));
-          console.log(`[supreme] Update announcement sent to ${chatId} (plaintext)`);
-        } catch (e2) {
-          console.error(`[supreme] Failed to notify ${chatId}:`, e2.message?.slice(0, 100));
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[supreme] Update announce error:', err.message);
-  }
-})();
 
 // ── Graceful Shutdown ─────────────────────────────────────────────────────────
 let shuttingDown = false;

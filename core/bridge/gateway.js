@@ -30,8 +30,9 @@ function getAgentActivity(agentId) {
 
 // ── Disk-based session reader (for standalone gateway mode) ──
 
-// Search multiple possible session directories (tamerclaw user dir + live system)
-// All agent dirs resolved from TAMERCLAW_HOME via paths module (no hardcoded /root/)
+// Agent directories resolved dynamically via paths module (no hardcoded /root/)
+const LIVE_AGENTS_DIR = paths.agents;
+const LIVE_USER_AGENTS_DIR = paths.agents;
 
 function _readSessionDir(sessionDir) {
   const result = [];
@@ -61,8 +62,28 @@ function _readSessionDir(sessionDir) {
 }
 
 function readAgentSessionsFromDisk(agentId) {
-  // Read sessions from tamerclaw user dir (the only canonical location)
+  // Check tamerclaw user dir first
   const result = _readSessionDir(paths.sessions(agentId));
+  // Also check live system sessions (bridge writes here)
+  const liveDir = path.join(LIVE_AGENTS_DIR, agentId, 'sessions');
+  const liveResults = _readSessionDir(liveDir);
+  // Also check live user/agents path (API-originated sessions saved here)
+  const liveUserDir = path.join(LIVE_USER_AGENTS_DIR, agentId, 'sessions');
+  const liveUserResults = _readSessionDir(liveUserDir);
+  // Merge, dedup by chatId
+  const seen = new Set(result.map(r => r.chatId));
+  for (const r of liveResults) {
+    if (!seen.has(r.chatId)) {
+      result.push(r);
+      seen.add(r.chatId);
+    }
+  }
+  for (const r of liveUserResults) {
+    if (!seen.has(r.chatId)) {
+      result.push(r);
+      seen.add(r.chatId);
+    }
+  }
   // Sort by lastActivity descending
   result.sort((a, b) => {
     const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
@@ -225,7 +246,7 @@ function extractMediaFromResponse(responseText, agentId) {
     let filePath = mediaTagMatch[1];
     // Resolve relative paths against agent workspace
     if (filePath.startsWith('./') && agentId) {
-      const agentWs = path.join(paths.agentDir(agentId), 'workspace');
+      const agentWs = path.join(paths.agents, agentId, 'workspace');
       const candidate = path.join(agentWs, filePath.slice(2));
       if (fs.existsSync(candidate)) filePath = candidate;
     }
@@ -382,6 +403,43 @@ async function handleRequest(req, res) {
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   try {
+    // ── Web UI (serve static files) ──
+    if (!pathname.startsWith('/api/') && method === 'GET') {
+      const WEB_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'web');
+      let filePath = pathname === '/' ? '/index.html' : pathname;
+      // Security: prevent path traversal
+      const safePath = path.resolve(WEB_DIR, filePath.replace(/^\//, ''));
+      if (!safePath.startsWith(path.resolve(WEB_DIR))) {
+        return json(res, 403, { error: 'Forbidden' });
+      }
+      if (fs.existsSync(safePath) && fs.statSync(safePath).isFile()) {
+        const ext = path.extname(safePath).toLowerCase();
+        const webMimeTypes = {
+          '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript',
+          '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg',
+          '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
+          '.woff': 'font/woff', '.ttf': 'font/ttf',
+        };
+        const contentType = webMimeTypes[ext] || 'application/octet-stream';
+        const stat = fs.statSync(safePath);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+        });
+        fs.createReadStream(safePath).pipe(res);
+        return;
+      }
+      // If not found, fall through to index.html (SPA fallback)
+      const indexPath = path.join(WEB_DIR, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        const stat = fs.statSync(indexPath);
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': stat.size, 'Cache-Control': 'no-cache' });
+        fs.createReadStream(indexPath).pipe(res);
+        return;
+      }
+    }
+
     // ── Public APK download ──
     if (pathname === '/api/download/apk' && method === 'GET') {
       const apkPath = path.join(paths.user, 'public', 'tamerclaw-latest.apk');
@@ -471,8 +529,8 @@ async function handleRequest(req, res) {
       const filePath = url.searchParams.get('path');
       if (!filePath) return json(res, 400, { error: 'path parameter required' });
 
-      // Security: only serve files from known agent directories
-      const allowedPrefixes = [paths.agents + '/', paths.user + '/', paths.tmp + '/'];
+      // Security: only serve files from known agent/workspace directories
+      const allowedPrefixes = [paths.agents + '/', paths.home + '/', '/tmp/'];
       const isAllowed = allowedPrefixes.some(prefix => filePath.startsWith(prefix));
       if (!isAllowed) return json(res, 403, { error: 'Access denied' });
 
@@ -550,6 +608,7 @@ async function handleRequest(req, res) {
       // Fallback: load from disk directly (check both tamerclaw user dir and live system)
       const candidates = [
         path.join(paths.sessions(agentId), `${chatId}.json`),
+        path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
       ];
       for (const sessionFile of candidates) {
         if (fs.existsSync(sessionFile)) {
@@ -696,7 +755,6 @@ async function handleRequest(req, res) {
         }
 
         // Synchronous mode (default — used by Telegram bridge)
-        // Track activity: agent is now thinking
         setAgentActivity(agentId, 'thinking');
         try {
           const response = await bridgeRef.sendAgentMessage(agentId, body.message, body.chatId, mediaPath);
@@ -827,6 +885,68 @@ async function handleRequest(req, res) {
       });
     }
 
+    // ── Account Rate Limit ──
+    if (pathname === '/api/ratelimit' && method === 'GET') {
+      const rl = bridgeRef?.getAccountRateLimit?.() || {};
+      return json(res, 200, {
+        ...rl,
+        formatted: bridgeRef?.getAccountRateLimitFormatted?.() || 'No data',
+      });
+    }
+
+    // ── TTS (Text-to-Speech) endpoint for web voice calls ──
+    // POST /api/agents/:id/tts  { text, voice?, provider?, model? }
+    // Returns audio/ogg stream
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/tts$/) && method === 'POST') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+
+      const body = await parseBody(req);
+      if (!body.text) return json(res, 400, { error: 'text required' });
+
+      try {
+        const audioPath = await textToSpeech(body.text, {
+          voice: body.voice || 'josh',
+          provider: body.provider || undefined,
+          model: body.model || 'flash',
+        });
+
+        if (!fs.existsSync(audioPath)) {
+          return json(res, 500, { error: 'TTS generation failed — no audio file' });
+        }
+
+        const stat = fs.statSync(audioPath);
+        const ext = path.extname(audioPath).toLowerCase();
+        const mimeMap = { '.ogg': 'audio/ogg', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.opus': 'audio/opus' };
+        const contentType = mimeMap[ext] || 'audio/ogg';
+
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Cache-Control': 'no-cache',
+        });
+        const stream = fs.createReadStream(audioPath);
+        stream.pipe(res);
+        stream.on('end', () => {
+          // Clean up temp file
+          try { fs.unlinkSync(audioPath); } catch {}
+        });
+        return;
+      } catch (err) {
+        console.error(`[gateway] TTS error:`, err.message);
+        return json(res, 500, { error: `TTS failed: ${err.message}` });
+      }
+    }
+
+    // ── Agent activity status ──
+    // GET /api/agents/:id/activity
+    if (pathname.match(/^\/api\/agents\/[\w-]+\/activity$/) && method === 'GET') {
+      const agentId = pathname.split('/')[3];
+      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
+      const activity = getAgentActivity(agentId);
+      return json(res, 200, activity);
+    }
+
     // ── Stop agent ──
     // POST /api/agents/:id/stop
     if (pathname.match(/^\/api\/agents\/[\w-]+\/stop$/) && method === 'POST') {
@@ -848,15 +968,6 @@ async function handleRequest(req, res) {
       } catch {
         return json(res, 200, { stopped: false, error: 'No active process found' });
       }
-    }
-
-    // ── Agent activity status ──
-    // GET /api/agents/:id/activity
-    if (pathname.match(/^\/api\/agents\/[\w-]+\/activity$/) && method === 'GET') {
-      const agentId = pathname.split('/')[3];
-      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
-      const activity = getAgentActivity(agentId);
-      return json(res, 200, activity);
     }
 
     // ── Poll for new messages (2-way communication) ──
@@ -882,6 +993,7 @@ async function handleRequest(req, res) {
         if (!history) {
           const candidates = [
             path.join(paths.sessions(agentId), `${chatId}.json`),
+            path.join(LIVE_AGENTS_DIR, agentId, 'sessions', `${chatId}.json`),
           ];
           for (const sessionFile of candidates) {
             if (fs.existsSync(sessionFile)) {
@@ -931,50 +1043,6 @@ async function handleRequest(req, res) {
           sessions: recentSessions,
           hasNew: recentSessions.length > 0,
         });
-      }
-    }
-
-    // ── TTS (Text-to-Speech) endpoint for web/mobile voice calls ──
-    // POST /api/agents/:id/tts  { text, voice?, provider?, model? }
-    // Returns audio stream
-    if (pathname.match(/^\/api\/agents\/[\w-]+\/tts$/) && method === 'POST') {
-      const agentId = pathname.split('/')[3];
-      if (!config.agents[agentId]) return json(res, 404, { error: 'Agent not found' });
-
-      const body = await parseBody(req);
-      if (!body.text) return json(res, 400, { error: 'text required' });
-
-      try {
-        const audioPath = await textToSpeech(body.text, {
-          voice: body.voice || 'josh',
-          provider: body.provider || undefined,
-          model: body.model || 'flash',
-        });
-
-        if (!fs.existsSync(audioPath)) {
-          return json(res, 500, { error: 'TTS generation failed — no audio file' });
-        }
-
-        const stat = fs.statSync(audioPath);
-        const ext = path.extname(audioPath).toLowerCase();
-        const mimeMap = { '.ogg': 'audio/ogg', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.opus': 'audio/opus' };
-        const contentType = mimeMap[ext] || 'audio/ogg';
-
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Content-Length': stat.size,
-          'Cache-Control': 'no-cache',
-        });
-        const stream = fs.createReadStream(audioPath);
-        stream.pipe(res);
-        stream.on('end', () => {
-          // Clean up temp file
-          try { fs.unlinkSync(audioPath); } catch {}
-        });
-        return;
-      } catch (err) {
-        console.error(`[gateway] TTS error:`, err.message);
-        return json(res, 500, { error: `TTS failed: ${err.message}` });
       }
     }
 
