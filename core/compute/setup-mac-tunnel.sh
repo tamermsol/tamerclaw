@@ -14,7 +14,7 @@
 #   - autossh installed: brew install autossh
 # ============================================================
 
-SERVER_IP="${TAMERCLAW_SERVER_IP:-203.161.35.95}"
+SERVER_IP="${TAMERCLAW_SERVER_IP:?Set TAMERCLAW_SERVER_IP environment variable}"
 SERVER_USER="${TAMERCLAW_SERVER_USER:-root}"
 SERVER_PORT=22
 TUNNEL_PORT=2222

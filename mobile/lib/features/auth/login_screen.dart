@@ -43,7 +43,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       if (savedUrl != null && savedUrl.isNotEmpty) {
         _serverUrlController.text = savedUrl;
       } else {
-        _serverUrlController.text = 'http://203.161.35.95:19789';
+        _serverUrlController.text = 'http://YOUR_SERVER_IP:19789';
       }
       _checkConnection();
     }
