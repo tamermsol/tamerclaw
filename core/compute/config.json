@@ -2,18 +2,38 @@
   "nodes": {
     "mac-mini": {
       "name": "Mac Mini M1",
-      "host": "localhost",
+      "host": "127.0.0.1",
       "port": 2222,
       "user": "msoldev",
-      "description": "Apple M1 (8-core CPU, 8-core GPU), 8GB RAM, 256GB SSD",
+      "description": "Apple M1 (8-core CPU, 8-core GPU), 8GB RAM, macOS 26.2, Xcode 26.2",
       "capabilities": [
         "voice-processing",
         "image-processing",
+        "video-processing",
         "ml-inference",
         "apple-silicon",
         "ffmpeg",
-        "whisper-local"
+        "whisper-local",
+        "flutter-build",
+        "ios-build",
+        "macos-build",
+        "node-build",
+        "cocoapods",
+        "xcode",
+        "gui-control",
+        "screenshot",
+        "applescript",
+        "cliclick"
       ],
+      "toolchain": {
+        "xcode": "26.2",
+        "flutter": "3.29.2",
+        "node": "25.8.2",
+        "ffmpeg": "8.1",
+        "cocoapods": "1.16.2",
+        "python": "3.9.6",
+        "homebrew": "5.1.3"
+      },
       "max_concurrent_tasks": 3,
       "status": "active",
       "notes": "Connected via reverse SSH tunnel on port 2222. Tunnel managed by autossh on Mac Mini."
@@ -29,8 +49,44 @@
   },
   "defaults": {
     "timeout_ms": 120000,
+    "build_timeout_ms": 600000,
     "max_retries": 2,
     "temp_dir_remote": "/tmp/claude-compute",
     "temp_dir_local": "compute/tmp"
+  },
+  "agent_routing": {
+    "hbot": ["flutter-build", "ios-build", "voice-processing"],
+    "david": ["flutter-build", "ios-build", "voice-processing"],
+    "flutter": ["flutter-build", "ios-build", "macos-build"],
+    "smarty": ["flutter-build", "gui-control", "screenshot", "applescript", "voice-processing"],
+    "heygen": ["video-processing", "image-processing"],
+    "amir": ["video-processing", "voice-processing", "image-processing"],
+    "branding": ["image-processing"],
+    "designer": ["image-processing"],
+    "hbot-website": ["node-build", "image-processing"],
+    "msol": ["node-build"],
+    "mos-v3-website": ["node-build"],
+    "mos-post": ["video-processing", "image-processing"],
+    "mark": ["node-build"],
+    "fullstack": ["node-build"],
+    "supreme": ["voice-processing", "video-processing", "image-processing", "gui-control"],
+    "cto": ["gui-control", "screenshot", "applescript"],
+    "cdo": ["gui-control", "screenshot", "applescript", "image-processing"],
+    "cmo": ["gui-control", "screenshot", "applescript"],
+    "browser": ["gui-control", "screenshot", "applescript"],
+    "tamerclaw": ["gui-control", "screenshot", "applescript"]
+  },
+  "gui": {
+    "remote_tmp": "/tmp/claude-compute/gui",
+    "local_tmp": "compute/tmp/gui",
+    "screenshot_format": "png",
+    "default_wait_ms": 500,
+    "required_permissions": [
+      "Accessibility (System Settings -> Privacy -> Accessibility -> Terminal/sshd)",
+      "Screen Recording (System Settings -> Privacy -> Screen Recording -> Terminal/sshd)",
+      "Automation (System Settings -> Privacy -> Automation -> Terminal -> System Events)"
+    ],
+    "required_tools": ["screencapture", "osascript", "cliclick"],
+    "optional_tools": ["tesseract", "shortcuts"]
   }
 }

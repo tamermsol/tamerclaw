@@ -5,28 +5,47 @@
  * Runs every 2 minutes via cron. Checks if the Mac Mini tunnel is alive.
  * If status changes (online->offline or offline->online), announces on relay Telegram.
  *
+ * Enhanced features:
+ * - Kills stale sshd processes holding port 2222 when Mac goes offline
+ *   (clears the port so the Mac can reconnect immediately)
+ * - Tracks downtime duration
+ * - Zombie cleanup for stale processes on the Mac
+ * - More detailed status logging
+ *
  * State file: <TAMERCLAW_HOME>/user/compute/watchdog-state.json
+ * Log file:   <TAMERCLAW_HOME>/core/compute/watchdog.log
  * Cron: every 2 minutes — node <TAMERCLAW_HOME>/core/compute/watchdog.js
  */
 
-import { execFile } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import https from 'https';
-import paths from '../shared/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = path.join(paths.user, 'compute');
-const STATE_FILE = path.join(STATE_DIR, 'watchdog-state.json');
-const CONFIG_FILE = paths.computeConfig;
+
+// Attempt to load paths module, fall back to local defaults
+let STATE_DIR, STATE_FILE, CONFIG_FILE, LOG_FILE, MAIN_CONFIG;
+try {
+  const paths = (await import('../shared/paths.js')).default;
+  STATE_DIR = path.join(paths.user, 'compute');
+  MAIN_CONFIG = paths.config;
+  CONFIG_FILE = paths.computeConfig || path.join(__dirname, 'config.json');
+} catch {
+  STATE_DIR = path.join(__dirname, '..', '..', 'user', 'compute');
+  MAIN_CONFIG = path.join(__dirname, '..', '..', 'config.json');
+  CONFIG_FILE = path.join(__dirname, 'config.json');
+}
+STATE_FILE = path.join(STATE_DIR, 'watchdog-state.json');
+LOG_FILE = path.join(__dirname, 'watchdog.log');
 
 async function loadState() {
   try {
     const raw = await readFile(STATE_FILE, 'utf-8');
     return JSON.parse(raw);
   } catch {
-    return { lastStatus: null, lastChange: null, consecutiveFails: 0 };
+    return { lastStatus: null, lastChange: null, consecutiveFails: 0, offlineSince: null };
   }
 }
 
@@ -43,7 +62,7 @@ async function loadConfig() {
 /** Load relay bot token from config for notifications */
 async function loadNotifyConfig() {
   try {
-    const configRaw = await readFile(paths.config, 'utf-8');
+    const configRaw = await readFile(MAIN_CONFIG, 'utf-8');
     const config = JSON.parse(configRaw);
     return {
       token: config.relay?.token || config.telegram?.relayToken,
@@ -52,6 +71,22 @@ async function loadNotifyConfig() {
   } catch {
     return { token: null, chatId: null };
   }
+}
+
+/** Append to log file */
+async function log(message) {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  try {
+    const existing = await readFile(LOG_FILE, 'utf-8').catch(() => '');
+    // Keep last 500 lines
+    const lines = existing.split('\n').filter(Boolean);
+    if (lines.length > 500) lines.splice(0, lines.length - 500);
+    lines.push(line.trim());
+    await writeFile(LOG_FILE, lines.join('\n') + '\n');
+  } catch {
+    await writeFile(LOG_FILE, line);
+  }
+  console.log(line.trim());
 }
 
 /** Run SSH command on mac mini, return { code, stdout, stderr } */
@@ -81,6 +116,44 @@ function sshExec(config, command, timeoutMs = 15000) {
 async function checkAlive(config) {
   const result = await sshExec(config, 'echo ok');
   return result.code === 0 && result.stdout === 'ok';
+}
+
+/**
+ * Kill stale sshd processes that are holding port 2222 on the server.
+ * When the Mac Mini disconnects ungracefully (network drop), the sshd process
+ * on the server can remain alive. This function force-kills those stale processes
+ * so the port is free for the Mac to reconnect immediately.
+ *
+ * Returns: number of stale processes killed
+ */
+function cleanStalePort2222() {
+  try {
+    const ssOutput = execSync(
+      "ss -tlnp | grep ':2222' | grep -oP 'pid=\\K[0-9]+'",
+      { encoding: 'utf-8', timeout: 5000 }
+    ).trim();
+
+    if (!ssOutput) return 0;
+
+    const pids = [...new Set(ssOutput.split('\n').filter(Boolean))];
+    let killed = 0;
+
+    for (const pid of pids) {
+      try {
+        const cmdline = execSync(`cat /proc/${pid}/cmdline 2>/dev/null`, { encoding: 'utf-8', timeout: 2000 });
+        if (cmdline.includes('sshd')) {
+          execSync(`kill ${pid}`, { timeout: 2000 });
+          killed++;
+        }
+      } catch {
+        // Process may have already died
+      }
+    }
+
+    return killed;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -181,8 +254,29 @@ async function main() {
   // Track consecutive failures before announcing offline (avoid flapping)
   if (!alive) {
     state.consecutiveFails = (state.consecutiveFails || 0) + 1;
+
+    // === STALE PORT CLEANUP ===
+    if (state.consecutiveFails >= 1) {
+      const killed = cleanStalePort2222();
+      if (killed > 0) {
+        await log(`Killed ${killed} stale sshd process(es) holding port 2222 — clearing for reconnection`);
+      }
+    }
+
+    // Track when we first went offline
+    if (!state.offlineSince) {
+      state.offlineSince = now;
+    }
   } else {
+    // Calculate downtime if we were offline
+    if (state.offlineSince && state.consecutiveFails > 0) {
+      const downMs = new Date(now) - new Date(state.offlineSince);
+      const downSec = Math.round(downMs / 1000);
+      const downMin = Math.round(downSec / 60);
+      await log(`Back online after ${downMin > 0 ? downMin + 'm' : downSec + 's'} downtime (${state.consecutiveFails} failed checks)`);
+    }
     state.consecutiveFails = 0;
+    state.offlineSince = null;
   }
 
   // Only announce after 2 consecutive failures (4 minutes) to avoid false alarms
@@ -194,47 +288,55 @@ async function main() {
     try {
       const cleaned = await cleanupZombies(config);
       if (cleaned.length > 0) {
-        console.log(`[${now}] Zombie cleanup: ${cleaned.join(', ')}`);
+        await log(`Zombie cleanup: ${cleaned.join(', ')}`);
         // Only notify on actual zombie PROCESS kills, not routine temp file cleanup
         const processKills = cleaned.filter(c => !c.startsWith('temp files removed'));
         if (processKills.length > 0) {
           await sendTelegramMessage(notify.token, notify.chatId,
-            `\u{1F9F9} <b>Mac Mini — Zombie Cleanup</b>\n\n` +
-            processKills.map(c => `\u2022 ${c}`).join('\n')
+            `<b>Mac Mini — Zombie Cleanup</b>\n\n` +
+            processKills.map(c => `- ${c}`).join('\n')
           );
         }
       }
     } catch (err) {
-      console.log(`[${now}] Cleanup error: ${err.message}`);
+      await log(`Cleanup error: ${err.message}`);
     }
   }
 
   if (shouldAnnounceOffline) {
-    console.log(`[${now}] Mac Mini went OFFLINE — announcing`);
+    const staleKilled = cleanStalePort2222();
+    await log(`Mac Mini went OFFLINE — announcing (stale processes killed: ${staleKilled})`);
     await sendTelegramMessage(notify.token, notify.chatId,
-      `\u26A0\uFE0F <b>Mac Mini Compute Node — OFFLINE</b>\n\n` +
-      `The Mac Mini tunnel dropped. Possible causes:\n` +
-      `\u2022 WiFi network changed\n` +
-      `\u2022 Mac Mini restarted\n` +
-      `\u2022 Internet disruption\n\n` +
-      `autossh should auto-reconnect. If it doesn't come back in ~5 min, check the Mac Mini.`
+      `<b>Mac Mini Compute Node — OFFLINE</b>\n\n` +
+      `Tunnel dropped at ${now.split('T')[1].split('.')[0]} UTC.\n` +
+      `Stale port cleanup: ${staleKilled > 0 ? 'cleared ' + staleKilled + ' zombie sshd' : 'port was clean'}\n\n` +
+      `autossh + launchd should auto-reconnect. Port 2222 is cleared and ready.`
     );
     state.lastStatus = 'offline';
     state.lastChange = now;
   } else if (shouldAnnounceOnline) {
-    console.log(`[${now}] Mac Mini back ONLINE — announcing`);
+    // Calculate downtime
+    let downtimeStr = '';
+    if (state.lastChange) {
+      const downMs = new Date(now) - new Date(state.lastChange);
+      const downMin = Math.round(downMs / 60000);
+      downtimeStr = ` Downtime: ~${downMin} minute${downMin !== 1 ? 's' : ''}.`;
+    }
+    await log(`Mac Mini back ONLINE${downtimeStr}`);
     await sendTelegramMessage(notify.token, notify.chatId,
-      `\u2705 <b>Mac Mini Compute Node — BACK ONLINE</b>\n\n` +
-      `Tunnel reconnected successfully. All agents can use compute extension again.`
+      `<b>Mac Mini Compute Node — BACK ONLINE</b>\n\n` +
+      `Tunnel reconnected successfully.${downtimeStr}\n` +
+      `All agents can use compute extension again.`
     );
     state.lastStatus = 'online';
     state.lastChange = now;
   } else if (previousStatus === null) {
-    console.log(`[${now}] Watchdog first run — Mac Mini is ${currentStatus}`);
+    // First run — just record status, no announcement
+    await log(`Watchdog first run — Mac Mini is ${currentStatus}`);
     state.lastStatus = currentStatus;
     state.lastChange = now;
   } else {
-    console.log(`[${now}] Mac Mini: ${currentStatus} (no change)`);
+    await log(`Mac Mini: ${currentStatus} (consecutive fails: ${state.consecutiveFails})`);
   }
 
   await saveState(state);
