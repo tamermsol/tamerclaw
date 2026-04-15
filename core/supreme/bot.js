@@ -17,6 +17,7 @@ import os from 'os';
 import { spawn, execSync } from 'child_process';
 import TelegramBot from 'node-telegram-bot-api';
 import paths from '../shared/paths.js';
+import { UpdateAnnouncer } from '../shared/update-announcer.js';
 
 // ── Friendly Error Formatter ──────────────────────────────────────────────────
 function friendlyError(rawMsg) {
@@ -96,6 +97,13 @@ try {
 const bot = new TelegramBot(TOKEN, { polling: true });
 console.log('👑 Supreme Agent Bot v3.0 (streaming + singleton guard) started');
 console.log(`Token: ...${TOKEN.slice(-8)} | PID: ${process.pid}`);
+
+// ── Update Announcer ─────────────────────────────────────────────────────────
+const announcer = new UpdateAnnouncer(AGENT_DIR, CWD);
+const pendingUpdate = announcer.checkPendingUpdate();
+if (pendingUpdate) {
+  console.log(`[supreme] Post-update announcement queued: v${pendingUpdate.oldVersion} → v${pendingUpdate.newVersion}`);
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let activeProcess = null;
@@ -997,6 +1005,26 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  // ── Post-Update Announcement (fires once after ./tamerclaw update) ──────
+  if (announcer.hasPendingAnnouncement()) {
+    try {
+      const announcement = announcer.getAnnouncement();
+      if (announcement) {
+        await bot.sendMessage(chatId, announcement, { parse_mode: 'Markdown' });
+        announcer.markAnnounced();
+        console.log(`[supreme] Update announcement sent to ${username}`);
+      }
+    } catch (err) {
+      console.error('[supreme] Failed to send update announcement:', err.message);
+      // Try without markdown in case of formatting issues
+      try {
+        const announcement = announcer.getAnnouncement();
+        await bot.sendMessage(chatId, announcement);
+        announcer.markAnnounced();
+      } catch {}
+    }
+  }
+
   // Handle /stop
   if (msg.text === '/stop') {
     if (activeProcess) {
@@ -1097,10 +1125,32 @@ bot.on('message', async (msg) => {
   }
 
 
+  // Handle /changelog — version history
+  if (msg.text === '/changelog') {
+    try {
+      const changelog = announcer.getChangelog(5);
+      bot.sendMessage(chatId, changelog, { parse_mode: 'Markdown' });
+    } catch (err) {
+      bot.sendMessage(chatId, '❌ Failed to load changelog: ' + err.message);
+    }
+    return;
+  }
+
+  // Handle /whatsnew — current version features + command cheat sheet
+  if (msg.text === '/whatsnew') {
+    try {
+      const whatsNew = announcer.getWhatsNew();
+      bot.sendMessage(chatId, whatsNew, { parse_mode: 'Markdown' });
+    } catch (err) {
+      bot.sendMessage(chatId, '❌ Failed to load what\'s new: ' + err.message);
+    }
+    return;
+  }
+
   // Handle /start
   if (msg.text?.startsWith('/start')) {
     bot.sendMessage(chatId,
-      '👑 *Supreme Agent Online*\n\nI am the master controller of the claude-agents ecosystem.\n\nCommands:\n• /status — System status\n• /agents — List all agents\n• /account — Current Claude account\n• /switch meetings|design|tony|hadeel|resume — Switch Claude account\n• /usage — Token usage & rate limits\n• /stop — Stop current task\n\nOr just tell me what you need.',
+      '👑 *Supreme Agent Online*\n\nI am the master controller of the claude-agents ecosystem.\n\nCommands:\n• /status — System status\n• /agents — List all agents\n• /account — Current Claude account\n• /switch — Switch Claude account\n• /usage — Token usage & rate limits\n• /changelog — Version history\n• /whatsnew — Features & command cheat sheet\n• /stop — Stop current task\n\nOr just tell me what you need.',
       { parse_mode: 'Markdown' }
     );
     return;

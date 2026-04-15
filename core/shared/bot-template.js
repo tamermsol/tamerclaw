@@ -1383,7 +1383,7 @@ ${CWD}
     // ── /start command ───────────────────────────────────────────────────
     if (msg.text?.startsWith('/start')) {
       const teamLine = isTeamLeader(AGENT_ID) ? '\n• /team — Team leader commands (status, assign, meeting)' : '';
-      const greeting = cfg.greeting || `${cfg.statusEmoji} *${AGENT_ID} Online*\n\nCommands:\n• /status — Agent status\n• /stop — Stop current task\n• /newsession — Reset conversation context\n• /sessions — View session history\n• /resume <n> — Resume a previous session\n• /model [opus|sonnet|haiku] — Switch model${teamLine}\n\nSend me a message to get started.`;
+      const greeting = cfg.greeting || `${cfg.statusEmoji} *${AGENT_ID} Online*\n\nCommands:\n• /status — Agent status\n• /stop — Stop current task\n• /newsession — Reset conversation context\n• /sessions — View session history\n• /resume <n> — Resume a previous session\n• /model [opus|sonnet|haiku] — Switch model\n• /whatsnew — Latest features & commands\n• /changelog — Version history${teamLine}\n\nSend me a message to get started.`;
       bot.sendMessage(chatId, greeting, { parse_mode: 'Markdown' });
       return;
     }

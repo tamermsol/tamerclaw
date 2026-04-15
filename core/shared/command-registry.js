@@ -479,6 +479,44 @@ export function registerBuiltins(registry) {
       return { action: 'list_features' };
     },
   });
+
+  registry.register({
+    name: 'changelog',
+    description: 'Show TamerClaw version history',
+    type: COMMAND_TYPES.LOCAL,
+    bridgeSafe: true,
+    source: 'builtin',
+    handler: async (ctx) => {
+      try {
+        const { UpdateAnnouncer } = await import('./update-announcer.js');
+        const agentDir = ctx.agentDir || `${process.env.TAMERCLAW_HOME || '/root/tamerclaw'}/user/agents/${ctx.agentId || 'default'}`;
+        const homeDir = process.env.TAMERCLAW_HOME || '/root/tamerclaw';
+        const ann = new UpdateAnnouncer(agentDir, homeDir);
+        return { text: ann.getChangelog(5) };
+      } catch (err) {
+        return { text: 'Changelog unavailable: ' + err.message };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'whatsnew',
+    description: 'Show what\'s new in the latest version + command cheat sheet',
+    type: COMMAND_TYPES.LOCAL,
+    bridgeSafe: true,
+    source: 'builtin',
+    handler: async (ctx) => {
+      try {
+        const { UpdateAnnouncer } = await import('./update-announcer.js');
+        const agentDir = ctx.agentDir || `${process.env.TAMERCLAW_HOME || '/root/tamerclaw'}/user/agents/${ctx.agentId || 'default'}`;
+        const homeDir = process.env.TAMERCLAW_HOME || '/root/tamerclaw';
+        const ann = new UpdateAnnouncer(agentDir, homeDir);
+        return { text: ann.getWhatsNew() };
+      } catch (err) {
+        return { text: 'What\'s new unavailable: ' + err.message };
+      }
+    },
+  });
 }
 
 // ── Singleton ────────────────────────────────────────────────────────────
