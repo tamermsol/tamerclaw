@@ -1,0 +1,9 @@
+{
+  "_description": "PM2 Process Registry — maps each PM2 process to its owning agent. Agents may ONLY manage processes they own.",
+  "_updated": "TEMPLATE — populate with your own processes",
+  "processes": {},
+  "reserved_ports": {},
+  "systemd_managed": {
+    "_note": "These services run via systemd, NOT PM2. Listed here for reference only."
+  }
+}

@@ -1,0 +1,211 @@
+{
+  "_comment": "TamerClaw configuration — copy this to config.json and fill in your values",
+
+  "version": 2,
+
+  "system": {
+    "name": "tamerclaw",
+    "description": "Multi-agent system powered by Claude Code SDK"
+  },
+
+  "models": {
+    "_comment": "Configure AI model providers and defaults",
+    "providers": {
+      "anthropic": {
+        "api": "claude-cli",
+        "models": {
+          "claude-opus-4-6": {
+            "cliFlag": "opus",
+            "contextWindow": 200000,
+            "maxTokens": 16384
+          },
+          "claude-sonnet-4-6": {
+            "cliFlag": "sonnet",
+            "contextWindow": 200000,
+            "maxTokens": 16384
+          },
+          "claude-haiku-4-5": {
+            "cliFlag": "haiku",
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        }
+      },
+      "deepseek": {
+        "_comment": "Optional: OpenAI-compatible provider",
+        "api": "openai-compatible",
+        "baseUrl": "https://api.deepseek.com",
+        "envKey": "DEEPSEEK_API_KEY",
+        "models": {
+          "deepseek-chat": {
+            "contextWindow": 32768,
+            "maxTokens": 16384,
+            "reasoning": true
+          }
+        }
+      }
+    },
+    "defaultProvider": "anthropic"
+  },
+
+  "defaults": {
+    "_comment": "Default settings for all agents unless overridden",
+    "model": "claude-sonnet-4-6",
+    "fallbackModels": [
+      "claude-sonnet-4-0",
+      "claude-haiku-4-5"
+    ],
+    "maxTokens": 16384,
+    "contextTokens": 131072,
+    "allowedTools": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "Agent"
+    ],
+    "sessionScope": "per-chat",
+    "memoryEnabled": true
+  },
+
+  "telegram": {
+    "_comment": "Telegram bot bridge configuration",
+    "pollingInterval": 1000,
+    "maxMessageLength": 4096,
+    "splitLongMessages": true,
+    "debounceMs": 2000,
+    "dmPolicy": "open",
+    "groupPolicy": "allowlist",
+    "streaming": "on",
+    "sharedBotToken": "YOUR_SHARED_BOT_TOKEN_HERE"
+  },
+
+  "tools": {
+    "web": {
+      "search": {
+        "maxResults": 5
+      }
+    },
+    "agentToAgent": {
+      "enabled": true
+    },
+    "exec": {}
+  },
+
+  "gateway": {
+    "_comment": "REST API gateway for external integrations (e.g., mobile app commands)",
+    "enabled": true,
+    "port": 19789,
+    "bind": "all",
+    "auth": {
+      "mode": "token",
+      "token": "YOUR_GATEWAY_AUTH_TOKEN_HERE"
+    },
+    "denyCommands": [
+      "camera.snap",
+      "camera.clip",
+      "screen.record",
+      "calendar.add",
+      "contacts.add",
+      "reminders.add"
+    ]
+  },
+
+  "cron": {
+    "_comment": "Built-in cron scheduler for recurring tasks",
+    "enabled": true,
+    "jobsFile": "cron/jobs.json",
+    "runsDir": "cron/runs",
+    "tickIntervalMs": 30000
+  },
+
+  "deliveryQueue": {
+    "_comment": "Queue for delivering messages/files to users with retries",
+    "enabled": true,
+    "dir": "delivery-queue",
+    "retryIntervalMs": 60000,
+    "maxRetries": 3
+  },
+
+  "agents": {
+    "_comment": "Define your agents here. Each key is the agent name.",
+
+    "example-agent": {
+      "telegramAccount": "example",
+      "botToken": "YOUR_BOT_TOKEN_HERE",
+      "model": "dynamic",
+      "standalone": true,
+      "standalonePath": "agents/example/bot.js",
+      "service": "example-agent.service",
+      "workspace": "agents/example",
+      "identity": "agents/example/IDENTITY.md",
+      "healthFile": "agents/example/health.json",
+      "modelRouting": {
+        "_comment": "Optional: route to different models based on message complexity",
+        "simple": "claude-haiku-4-5",
+        "complex": "claude-opus-4-6",
+        "default": "claude-sonnet-4-6",
+        "complexPatterns": [
+          "debug",
+          "fix",
+          "refactor",
+          "optimize",
+          "architecture"
+        ]
+      },
+      "allowedTools": [
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+        "Agent"
+      ],
+      "team": {
+        "_comment": "Optional: team membership",
+        "role": "member",
+        "teamId": "tech-team"
+      }
+    }
+  },
+
+  "standaloneAgents": [
+    "_comment: List agent names that run as independent systemd services",
+    "example-agent"
+  ],
+
+  "teams": {
+    "_comment": "Define team hierarchy. Teams can have leaders and members.",
+
+    "tech-team": {
+      "name": "Engineering",
+      "leader": "cto",
+      "members": ["cto", "example-agent"],
+      "description": "All engineering work"
+    },
+
+    "executive": {
+      "name": "Executive Layer",
+      "leader": "supreme",
+      "members": ["supreme", "cto"],
+      "description": "C-suite leadership"
+    }
+  },
+
+  "owner": {
+    "_comment": "Your Telegram user ID for receiving notifications",
+    "telegramId": "YOUR_TELEGRAM_USER_ID_HERE"
+  },
+
+  "relay": {
+    "_comment": "Relay bot for system notifications (watchdog, health alerts)",
+    "token": "YOUR_RELAY_BOT_TOKEN_HERE"
+  }
+}

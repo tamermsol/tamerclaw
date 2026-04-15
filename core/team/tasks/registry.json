@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "_description": "Task registry — tracks all tasks assigned to agents. Managed by the task framework.",
+  "_schema": {
+    "task": {
+      "id": "string — unique task ID (e.g., task-2026-04-15-abc1)",
+      "title": "string — short description of the task",
+      "requestedBy": "string — who requested the task (e.g., 'tim', agent name)",
+      "assignedTo": "string — agent responsible for the task",
+      "delegatedTo": "string[] — agents this task was delegated to",
+      "expectedOutput": "string — what the requester expects as deliverable",
+      "status": "string — received | planning | in-progress | blocked | completed | failed | cancelled",
+      "priority": "string — low | medium | high | critical",
+      "createdAt": "ISO datetime",
+      "updatedAt": "ISO datetime",
+      "deadline": "ISO datetime | null",
+      "statusHistory": [
+        {
+          "status": "string",
+          "at": "ISO datetime",
+          "by": "string — agent name",
+          "details": "string | null"
+        }
+      ],
+      "subtasks": "string[] — IDs of child tasks",
+      "checkIns": "object[] — periodic progress updates",
+      "plan": "string | null — the agent's execution plan",
+      "deliverables": "string[] — paths or descriptions of output",
+      "timeouts": {
+        "planningMaxMs": "number — max time for planning phase",
+        "delegationMaxMs": "number — max time for delegation",
+        "progressCheckMs": "number — interval for progress checks",
+        "escalateAfterMs": "number — escalate if no progress",
+        "alertTimAfterMs": "number — alert owner if stuck",
+        "totalMaxMs": "number — absolute max time for task"
+      }
+    }
+  },
+  "tasks": {}
+}
