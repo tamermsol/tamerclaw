@@ -28,6 +28,7 @@ import { transcribeAudio } from './transcribe.js';
 import { archiveSession, formatSessionsList, getSessionByIndex, getSessionById } from './session-history.js';
 import { MeetingCommandHandler } from '../meetings/meeting-commands.js';
 import { createTeamCommands, getTeamLeaderPrompt, getTeamMemberPrompt, isTeamLeader } from './team-leader.js';
+import { UpdateAnnouncer } from './update-announcer.js';
 
 // v1.15.0: Claude Code architecture modules
 import { feature } from './feature-flags.js';
@@ -251,6 +252,18 @@ export function createBot(config) {
   const AGENT_ID = cfg.agentId;
   const TIMEOUT_MS = cfg.timeoutMs;
   const TIMEOUT_WARNING_MS = TIMEOUT_MS * 0.8;
+
+  // ── Update Announcer ──────────────────────────────────────────────────────
+  let announcer = null;
+  try {
+    announcer = new UpdateAnnouncer(AGENT_DIR, paths.home);
+    const pendingUpdate = announcer.checkPendingUpdate();
+    if (pendingUpdate) {
+      console.log(`[${AGENT_ID}] Post-update announcement queued: v${pendingUpdate.oldVersion} → v${pendingUpdate.newVersion}`);
+    }
+  } catch (e) {
+    console.warn(`[${AGENT_ID}] UpdateAnnouncer init failed (non-fatal):`, e.message);
+  }
 
   // ── Singleton Guard ───────────────────────────────────────────────────────
   try {
@@ -1377,6 +1390,36 @@ ${CWD}
       let statusMsg = `${cfg.statusEmoji} *${AGENT_ID}*\nUptime: ${uptime}s\nMemory: ${memMB}MB\nCalls: ${callCount}\nErrors: ${errorCount}\nModel: ${currentModelStr}`;
       if (session) statusMsg += `\nSession: ${session.sessionId.slice(0, 8)}... (${session.messageCount} msgs)`;
       bot.sendMessage(chatId, statusMsg, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    // ── /changelog command ─────────────────────────────────────────────
+    if (msg.text === '/changelog') {
+      if (announcer) {
+        try {
+          const changelog = announcer.getChangelog(5);
+          bot.sendMessage(chatId, changelog, { parse_mode: 'Markdown' });
+        } catch (err) {
+          bot.sendMessage(chatId, '❌ Failed to load changelog: ' + err.message);
+        }
+      } else {
+        bot.sendMessage(chatId, 'Changelog not available — update announcer not initialized.');
+      }
+      return;
+    }
+
+    // ── /whatsnew command ──────────────────────────────────────────────
+    if (msg.text === '/whatsnew') {
+      if (announcer) {
+        try {
+          const whatsNew = announcer.getWhatsNew();
+          bot.sendMessage(chatId, whatsNew, { parse_mode: 'Markdown' });
+        } catch (err) {
+          bot.sendMessage(chatId, '❌ Failed to load what\'s new: ' + err.message);
+        }
+      } else {
+        bot.sendMessage(chatId, 'What\'s new not available — update announcer not initialized.');
+      }
       return;
     }
 

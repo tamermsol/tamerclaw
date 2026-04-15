@@ -1,16 +1,13 @@
 {
-  "version": "1.20.0",
+  "version": "1.20.1",
   "codename": "Herald",
   "releasedAt": "2026-04-15",
-  "changelog": "Post-update announcement system — Supreme Agent now announces what's new after every ./tamerclaw update. New /changelog and /whatsnew commands for all agents. Feature knowledge base maps modules to user-facing commands.",
+  "changelog": "Fix /whatsnew and /changelog commands — wired handlers into bot-template (all standalone agents) and bridge (relay agents). Previously these commands were only handled in supreme bot.js, causing 'Unknown skill' errors for all other agents.",
   "modules": {
-    "new": [
-      "update-announcer.js"
-    ],
+    "new": [],
     "updated": [
-      "supreme/bot.js",
-      "command-registry.js",
-      "bot-template.js"
+      "bot-template.js",
+      "bridge/index.js"
     ]
   },
   "commands": {
@@ -20,6 +17,12 @@
     ]
   },
   "history": [
+    {
+      "version": "1.20.0",
+      "codename": "Herald",
+      "releasedAt": "2026-04-15",
+      "changelog": "Post-update announcement system — Supreme Agent now announces what's new after every ./tamerclaw update. New /changelog and /whatsnew commands for all agents. Feature knowledge base maps modules to user-facing commands."
+    },
     {
       "version": "1.19.0",
       "codename": "Nexus",

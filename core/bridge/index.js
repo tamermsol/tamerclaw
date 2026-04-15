@@ -32,6 +32,7 @@ import { formatRateLine, recordUsage } from '../shared/rate-tracker.js';
 import { updateAccountRateLimit as updateSharedRateLimit, getAccountRateLimit as getSharedRateLimit, formatAccountRateLimit as formatSharedAccountRateLimit, formatRateLineCompact } from '../shared/account-ratelimit.js';
 import os from 'os';
 import paths from '../shared/paths.js';
+import { UpdateAnnouncer } from '../shared/update-announcer.js';
 
 // ── Claude Engine (extracted from Claude Code leak) ──────────────────────────
 let ClaudeEngine = null;
@@ -46,6 +47,14 @@ try {
 const CONFIG_PATH = paths.config;
 const SHARED_DIR = paths.shared;
 const CREDENTIALS_DIR = paths.credentials;
+
+// ── Bridge-level Update Announcer (for /whatsnew and /changelog in bridge mode) ──
+let bridgeAnnouncer = null;
+try {
+  bridgeAnnouncer = new UpdateAnnouncer(paths.supremeRuntime, paths.home);
+} catch (e) {
+  console.warn('[bridge] UpdateAnnouncer init failed (non-fatal):', e.message);
+}
 
 // ── State ──────────────────────────────────────────────────────────────────
 const bots = new Map();           // agentId → TelegramBot instance
@@ -1823,10 +1832,42 @@ function startBot(agentId, agentConfig, config) {
           `/help — Show this help\n` +
           `/status — System status\n` +
           `/usage — Session cost & token usage\n` +
-          `/agents — List all agents\n\n` +
+          `/agents — List all agents\n` +
+          `/whatsnew — Latest features & commands\n` +
+          `/changelog — Version history\n\n` +
           `Just send a message to talk to me. I can handle text, photos, voice notes, documents, and video.`,
           { parse_mode: 'Markdown' }
         );
+        return;
+      }
+
+      // /changelog command
+      if (msg.text === '/changelog') {
+        if (bridgeAnnouncer) {
+          try {
+            const changelog = bridgeAnnouncer.getChangelog(5);
+            await bot.sendMessage(msg.chat.id, changelog, { parse_mode: 'Markdown' });
+          } catch (err) {
+            await bot.sendMessage(msg.chat.id, '❌ Failed to load changelog: ' + err.message);
+          }
+        } else {
+          await bot.sendMessage(msg.chat.id, 'Changelog not available.');
+        }
+        return;
+      }
+
+      // /whatsnew command
+      if (msg.text === '/whatsnew') {
+        if (bridgeAnnouncer) {
+          try {
+            const whatsNew = bridgeAnnouncer.getWhatsNew();
+            await bot.sendMessage(msg.chat.id, whatsNew, { parse_mode: 'Markdown' });
+          } catch (err) {
+            await bot.sendMessage(msg.chat.id, '❌ Failed to load what\'s new: ' + err.message);
+          }
+        } else {
+          await bot.sendMessage(msg.chat.id, 'What\'s new not available.');
+        }
         return;
       }
 
