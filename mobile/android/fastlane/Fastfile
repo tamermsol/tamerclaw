@@ -1,0 +1,31 @@
+default_platform(:android)
+
+platform :android do
+  desc "Build release App Bundle for Play Store"
+  lane :build do
+    Dir.chdir("../..") do
+      sh("flutter build appbundle --release --obfuscate --split-debug-info=build/debug-info")
+    end
+  end
+
+  desc "Deploy to Google Play internal testing track"
+  lane :internal do
+    build
+    upload_to_play_store(
+      track: "internal",
+      aab: "../../build/app/outputs/bundle/release/app-release.aab",
+      json_key: "play-store-credentials.json",
+      package_name: "com.tamerclaw.app"
+    )
+  end
+
+  desc "Promote internal to production"
+  lane :production do
+    upload_to_play_store(
+      track: "internal",
+      track_promote_to: "production",
+      json_key: "play-store-credentials.json",
+      package_name: "com.tamerclaw.app"
+    )
+  end
+end

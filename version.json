@@ -1,10 +1,22 @@
 {
-  "version": "1.17.1",
-  "codename": "Phoenix",
-  "releasedAt": "2026-04-14",
-  "changelog": "Friendly API error messages — billing limits, rate limits, auth errors now show clean user-facing messages instead of raw JSON dumps",
+  "version": "1.18.0",
+  "codename": "Agency",
+  "releasedAt": "2026-04-15",
+  "changelog": "Agency Powerup — ./tamerclaw powerup sets up a full software agency with CTO, CMO, and specialized agents. Includes 17 new shared modules, mobile store publishing pipeline, and Anthropic SDK integration.",
   "modules": {
     "new": [
+      "anthropic-client.js",
+      "command-registry.js",
+      "compute-tools.js",
+      "echo-dedup.js",
+      "hooks.js",
+      "model-router.js",
+      "smart-memory-recall.js",
+      "tool-registry.js"
+    ],
+    "updated": [
+      "claude-engine.js",
+      "feature-flags.js",
       "token-budget.js",
       "extract-memories.js",
       "session-compact.js",
@@ -12,13 +24,15 @@
       "coordinator-mode.js",
       "reactive-store.js",
       "task-framework.js"
-    ],
-    "updated": [
-      "claude-engine.js",
-      "feature-flags.js"
     ]
   },
   "history": [
+    {
+      "version": "1.17.1",
+      "codename": "Phoenix",
+      "releasedAt": "2026-04-14",
+      "changelog": "Friendly API error messages — billing limits, rate limits, auth errors now show clean user-facing messages instead of raw JSON dumps"
+    },
     {
       "version": "1.16.0",
       "codename": "Titan",

@@ -66,5 +66,20 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- Permissions for App Store -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TamerClaw needs microphone access to record voice messages and make voice calls with your AI agents.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>TamerClaw needs camera access to take photos for sharing with your AI agents.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>TamerClaw needs photo library access to share images with your AI agents.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>TamerClaw needs permission to save images shared by your AI agents.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>TamerClaw uses Face ID to secure access to your AI agent conversations.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>TamerClaw uses speech recognition to convert your voice messages to text.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

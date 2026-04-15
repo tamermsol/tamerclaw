@@ -1,0 +1,10 @@
+# Generate a keystore with:
+# keytool -genkey -v -keystore tamerclaw-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias tamerclaw
+#
+# Then fill in these values and rename this file to key.properties
+# NEVER commit key.properties or .jks files to git!
+
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=tamerclaw
+storeFile=../tamerclaw-release.jks

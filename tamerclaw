@@ -1725,9 +1725,458 @@ WantedBy=$SVC_WANTED_BY"
   info "Repair complete! Run: tamerclaw restart all"
 }
 
+# ── Powerup Command ─────────────────────────────────────────────────────────
+# Sets up a full agency structure with engineering and marketing teams.
+# Run after init or update: ./tamerclaw powerup
+cmd_powerup() {
+  banner
+
+  # Must be initialized first
+  if [ ! -f "$SCRIPT_DIR/user/config.json" ]; then
+    err "TamerClaw not initialized. Run: tamerclaw init"
+    exit 1
+  fi
+
+  # Load agency definition
+  local agency_file="$SCRIPT_DIR/core/powerup/agency.json"
+  if [ ! -f "$agency_file" ]; then
+    err "Agency definition not found: $agency_file"
+    err "Run: tamerclaw update   to get the latest version"
+    exit 1
+  fi
+
+  echo ""
+  echo -e "${BOLD}🚀 TamerClaw Agency Powerup${NC}"
+  echo ""
+  echo "This will set up a full software agency with specialized agents."
+  echo "Each agent gets its own Telegram bot for direct communication."
+  echo ""
+  echo -e "${BOLD}═══ Agency Structure ═══${NC}"
+  echo ""
+  echo -e "  ${CYAN}1) CTO Agent${NC} — Engineering team leader"
+  echo "     1.1 Flutter Developer (Mac Mini builds)"
+  echo "     1.2 Frontend Developer (React/Next.js)"
+  echo "     1.3 Backend Developer (APIs/databases)"
+  echo "     1.4 Designer (UI/UX)"
+  echo "     1.5 QA Engineer (testing)"
+  echo ""
+  echo -e "  ${CYAN}2) CMO Agent${NC} — Marketing team leader"
+  echo "     2.1 Presentation Agent (slide decks)"
+  echo "     2.2 Digital Marketing Specialist (SEO/social)"
+  echo ""
+
+  # Check which agents already exist
+  local existing_agents
+  existing_agents=$(node -e "
+    const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json', 'utf-8'));
+    console.log(Object.keys(c.agents || {}).join(','));
+  " 2>/dev/null || echo "")
+
+  local already_count=0
+  local agent_ids=("cto" "flutter" "frontend" "backend" "designer" "qa" "cmo" "presentations" "digital-marketing")
+  for aid in "${agent_ids[@]}"; do
+    if echo ",$existing_agents," | grep -q ",$aid,"; then
+      already_count=$((already_count + 1))
+    fi
+  done
+
+  if [ "$already_count" -eq "${#agent_ids[@]}" ]; then
+    warn "All agency agents already exist in config."
+    ask "Reconfigure them? This will overwrite identities and team structure. (y/N):"
+    read -r redo
+    if [[ ! "$redo" =~ ^[Yy] ]]; then
+      echo "Aborted."
+      exit 0
+    fi
+  elif [ "$already_count" -gt 0 ]; then
+    info "$already_count agent(s) already exist — they will be updated with agency identities."
+  fi
+
+  # Read user info from existing config
+  local user_name
+  user_name=$(node -e "
+    const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json', 'utf-8'));
+    console.log(c.system?.installedBy || 'User');
+  " 2>/dev/null || echo "User")
+
+  local telegram_id=""
+  local allow_file="$SCRIPT_DIR/user/credentials/telegram-default-allowFrom.json"
+  if [ -f "$allow_file" ]; then
+    telegram_id=$(node -e "
+      const a = JSON.parse(require('fs').readFileSync('$allow_file', 'utf-8'));
+      if (a.users && a.users.length) console.log(a.users[0]);
+    " 2>/dev/null || echo "")
+  fi
+
+  # ── Collect bot tokens ──
+  echo -e "${BOLD}═══ Telegram Bot Setup ═══${NC}"
+  echo ""
+  echo "Create bots via @BotFather on Telegram. Each agent needs its own bot."
+  echo "Press Enter to skip any agent you don't need right now."
+  echo ""
+
+  # Agent display names for prompts
+  declare -A agent_display_names
+  agent_display_names=(
+    [cto]="CTO Agent"
+    [flutter]="Flutter Developer"
+    [frontend]="Frontend Developer"
+    [backend]="Backend Developer"
+    [designer]="Designer"
+    [qa]="QA Engineer"
+    [cmo]="CMO Agent"
+    [presentations]="Presentation Agent"
+    [digital-marketing]="Digital Marketing Specialist"
+  )
+
+  declare -A agent_tokens
+  local configured_count=0
+  local skipped_count=0
+
+  # Engineering team
+  echo -e "  ${BOLD}── Engineering Team ──${NC}"
+  for aid in cto flutter frontend backend designer qa; do
+    local display="${agent_display_names[$aid]}"
+    local existing_token=""
+    # Check if agent already has a token
+    if echo ",$existing_agents," | grep -q ",$aid,"; then
+      existing_token=$(node -e "
+        const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json', 'utf-8'));
+        const t = c.agents?.['$aid']?.botToken || '';
+        if (t) console.log(t);
+      " 2>/dev/null || echo "")
+    fi
+
+    if [ -n "$existing_token" ]; then
+      ask "$display [has token — Enter to keep, or paste new]:"
+    else
+      ask "$display bot token (Enter to skip):"
+    fi
+    read -r token
+
+    if [ -n "$token" ]; then
+      agent_tokens[$aid]="$token"
+      info "$display — token set"
+      configured_count=$((configured_count + 1))
+    elif [ -n "$existing_token" ]; then
+      agent_tokens[$aid]="$existing_token"
+      info "$display — keeping existing token"
+      configured_count=$((configured_count + 1))
+    else
+      warn "$display — skipped (set later: tamerclaw set-token $aid <token>)"
+      skipped_count=$((skipped_count + 1))
+    fi
+  done
+
+  echo ""
+  echo -e "  ${BOLD}── Marketing Team ──${NC}"
+  for aid in cmo presentations digital-marketing; do
+    local display="${agent_display_names[$aid]}"
+    local existing_token=""
+    if echo ",$existing_agents," | grep -q ",$aid,"; then
+      existing_token=$(node -e "
+        const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json', 'utf-8'));
+        const t = c.agents?.['$aid']?.botToken || '';
+        if (t) console.log(t);
+      " 2>/dev/null || echo "")
+    fi
+
+    if [ -n "$existing_token" ]; then
+      ask "$display [has token — Enter to keep, or paste new]:"
+    else
+      ask "$display bot token (Enter to skip):"
+    fi
+    read -r token
+
+    if [ -n "$token" ]; then
+      agent_tokens[$aid]="$token"
+      info "$display — token set"
+      configured_count=$((configured_count + 1))
+    elif [ -n "$existing_token" ]; then
+      agent_tokens[$aid]="$existing_token"
+      info "$display — keeping existing token"
+      configured_count=$((configured_count + 1))
+    else
+      warn "$display — skipped (set later: tamerclaw set-token $aid <token>)"
+      skipped_count=$((skipped_count + 1))
+    fi
+  done
+
+  echo ""
+  info "Setting up $configured_count agent(s) ($skipped_count skipped)..."
+  echo ""
+
+  # ── Create agent directories and copy identities ──
+  local identities_dir="$SCRIPT_DIR/core/powerup/identities"
+
+  for aid in "${agent_ids[@]}"; do
+    # Create directories
+    mkdir -p "$SCRIPT_DIR/user/agents/$aid/memory"
+    mkdir -p "$SCRIPT_DIR/user/agents/$aid/sessions"
+    mkdir -p "$SCRIPT_DIR/user/agents/$aid/media"
+    mkdir -p "$SCRIPT_DIR/user/agents/$aid/inbox"
+    mkdir -p "$SCRIPT_DIR/user/agents/$aid/plans"
+
+    # Copy identity file
+    if [ -f "$identities_dir/$aid.md" ]; then
+      cp "$identities_dir/$aid.md" "$SCRIPT_DIR/user/agents/$aid/IDENTITY.md"
+    fi
+
+    # Create USER.md
+    cat > "$SCRIPT_DIR/user/agents/$aid/USER.md" << USEREOF
+# User Profile
+
+- **Name:** $user_name
+- **Telegram ID:** ${telegram_id:-not set}
+USEREOF
+
+    # Create TOOLS.md based on role
+    local tools_content=""
+    case "$aid" in
+      cto|cmo)
+        tools_content="# ${agent_display_names[$aid]} Tools
+
+## System Access
+- Full read/write to TamerClaw directory
+- Can run shell commands
+- Web research (WebSearch, WebFetch)
+- Sub-agent spawning (Agent tool)
+- Team delegation via inbox system
+
+## Team Leader Capabilities
+- /team status — Show team member status
+- /team assign <member> <task> — Delegate tasks
+- /team meeting <topic> — Start team meetings
+- /team review — Consolidated progress report
+
+## Allowed Tools
+Read, Write, Edit, Bash, Glob, Grep, Agent, WebSearch, WebFetch
+
+## Self-Protection
+- NEVER restart your own service
+- NEVER edit your own bot.js
+- NEVER kill your own process"
+        ;;
+      *)
+        tools_content="# ${agent_display_names[$aid]} Tools
+
+## System Access
+- Full read/write to agent workspace
+- Can run shell commands
+- Web research (WebSearch, WebFetch)
+
+## Allowed Tools
+Read, Write, Edit, Bash, Glob, Grep, Agent, WebSearch, WebFetch
+
+## Task Inbox
+- Check inbox for delegated tasks from team leader
+- Report progress and results back
+- Escalate blockers immediately
+
+## Self-Protection
+- NEVER restart your own service
+- NEVER edit your own bot.js
+- NEVER kill your own process"
+        ;;
+    esac
+    echo "$tools_content" > "$SCRIPT_DIR/user/agents/$aid/TOOLS.md"
+
+    # Create agent config.json (per-agent config for bot-template)
+    local team_role="member"
+    local team_id="engineering"
+    local reports_to="cto"
+
+    case "$aid" in
+      cto)
+        team_role="leader"
+        team_id="engineering"
+        reports_to=""
+        ;;
+      cmo)
+        team_role="leader"
+        team_id="marketing"
+        reports_to=""
+        ;;
+      presentations|digital-marketing)
+        team_role="member"
+        team_id="marketing"
+        reports_to="cmo"
+        ;;
+      *)
+        team_role="member"
+        team_id="engineering"
+        reports_to="cto"
+        ;;
+    esac
+
+    if [ "$team_role" = "leader" ]; then
+      local members_json=""
+      case "$aid" in
+        cto) members_json='"flutter", "frontend", "backend", "designer", "qa"' ;;
+        cmo) members_json='"presentations", "digital-marketing"' ;;
+      esac
+      cat > "$SCRIPT_DIR/user/agents/$aid/config.json" << CFGEOF
+{
+  "team": {
+    "role": "leader",
+    "teamId": "$team_id",
+    "members": [$members_json]
+  },
+  "plugins": ["code-review", "security-guidance", "code-simplifier"],
+  "streaming": true,
+  "systemPromptFiles": ["IDENTITY.md", "USER.md", "TOOLS.md"]
+}
+CFGEOF
+    else
+      cat > "$SCRIPT_DIR/user/agents/$aid/config.json" << CFGEOF
+{
+  "team": {
+    "role": "member",
+    "teamId": "$team_id",
+    "reportsTo": "$reports_to"
+  },
+  "plugins": ["code-review", "security-guidance", "code-simplifier"],
+  "streaming": true,
+  "systemPromptFiles": ["IDENTITY.md", "USER.md", "TOOLS.md"]
+}
+CFGEOF
+    fi
+
+    info "Created agent: ${agent_display_names[$aid]} ($aid)"
+  done
+
+  # ── Update main config.json with all agents and teams ──
+  info "Updating config.json with agency structure..."
+
+  # Write tokens to a temp file so Node can read them safely
+  local token_tmp="$SCRIPT_DIR/user/tmp/.powerup-tokens.json"
+  echo "{" > "$token_tmp"
+  local first_token=true
+  for k in "${!agent_tokens[@]}"; do
+    if $first_token; then
+      first_token=false
+    else
+      echo "," >> "$token_tmp"
+    fi
+    # Escape the token value for JSON
+    local escaped_val
+    escaped_val=$(echo -n "${agent_tokens[$k]}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    echo -n "  \"$k\": \"$escaped_val\"" >> "$token_tmp"
+  done
+  echo "" >> "$token_tmp"
+  echo "}" >> "$token_tmp"
+
+  node -e "
+    const fs = require('fs');
+    const configPath = '$SCRIPT_DIR/user/config.json';
+    const c = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const tokens = JSON.parse(fs.readFileSync('$token_tmp', 'utf-8'));
+
+    const agentDefs = {
+      cto:                { complexPatterns: ['debug','fix','refactor','implement','create','design','architect','plan','analyze','review','delegate','coordinate'] },
+      flutter:            { complexPatterns: ['debug','fix','refactor','implement','create','design','architect','plan','analyze','build','widget','layout'] },
+      frontend:           { complexPatterns: ['debug','fix','refactor','implement','create','design','architect','plan','analyze','component','layout','style'] },
+      backend:            { complexPatterns: ['debug','fix','refactor','implement','create','design','architect','plan','analyze','api','database','migration'] },
+      designer:           { complexPatterns: ['design','architect','plan','analyze','review','layout','typography','color','spacing','prototype'] },
+      qa:                 { complexPatterns: ['debug','analyze','review','test','investigate','regression','validate','compare'] },
+      cmo:                { complexPatterns: ['plan','strategy','analyze','review','research','campaign','content','brand','delegate','coordinate'] },
+      presentations:      { complexPatterns: ['design','create','plan','analyze','pitch','deck','story','narrative'] },
+      'digital-marketing':{ complexPatterns: ['plan','strategy','analyze','research','seo','campaign','content','audit','keyword'] }
+    };
+
+    const agentIds = ['cto','flutter','frontend','backend','designer','qa','cmo','presentations','digital-marketing'];
+    c.agents = c.agents || {};
+
+    for (const aid of agentIds) {
+      const def = agentDefs[aid] || {};
+      const existing = c.agents[aid] || {};
+      c.agents[aid] = {
+        botToken: tokens[aid] || existing.botToken || '',
+        model: 'dynamic',
+        modelRouting: {
+          complex: 'claude-opus-4-6',
+          default: 'claude-sonnet-4-6',
+          complexPatterns: def.complexPatterns || []
+        },
+        workspace: existing.workspace || '',
+        identity: '$SCRIPT_DIR/user/agents/' + aid + '/IDENTITY.md'
+      };
+    }
+
+    c.teams = {
+      engineering: {
+        name: 'Engineering',
+        leader: 'cto',
+        members: ['cto', 'flutter', 'frontend', 'backend', 'designer', 'qa']
+      },
+      marketing: {
+        name: 'Marketing',
+        leader: 'cmo',
+        members: ['cmo', 'presentations', 'digital-marketing']
+      }
+    };
+
+    fs.writeFileSync(configPath, JSON.stringify(c, null, 2));
+    console.log('Config updated with ' + agentIds.length + ' agents and 2 teams');
+  "
+
+  # Clean up temp token file
+  rm -f "$token_tmp"
+
+  # ── Create team task directories ──
+  mkdir -p "$SCRIPT_DIR/user/tasks/pending"
+  mkdir -p "$SCRIPT_DIR/user/tasks/active"
+  mkdir -p "$SCRIPT_DIR/user/tasks/completed"
+  mkdir -p "$SCRIPT_DIR/user/tasks/failed"
+
+  # ── Summary ──
+  echo ""
+  echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+  echo -e "${GREEN}  🚀 Agency Powerup Complete!${NC}"
+  echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+  echo ""
+  echo "  Agency structure:"
+  echo ""
+  echo -e "  ${BOLD}Engineering Team${NC} (led by CTO)"
+  for aid in cto flutter frontend backend designer qa; do
+    local token="${agent_tokens[$aid]:-}"
+    if [ -n "$token" ]; then
+      echo -e "    ${GREEN}✓${NC} ${agent_display_names[$aid]} — ready"
+    else
+      echo -e "    ${YELLOW}○${NC} ${agent_display_names[$aid]} — needs token"
+    fi
+  done
+  echo ""
+  echo -e "  ${BOLD}Marketing Team${NC} (led by CMO)"
+  for aid in cmo presentations digital-marketing; do
+    local token="${agent_tokens[$aid]:-}"
+    if [ -n "$token" ]; then
+      echo -e "    ${GREEN}✓${NC} ${agent_display_names[$aid]} — ready"
+    else
+      echo -e "    ${YELLOW}○${NC} ${agent_display_names[$aid]} — needs token"
+    fi
+  done
+  echo ""
+
+  if [ "$skipped_count" -gt 0 ]; then
+    echo "  Set missing tokens with:"
+    echo "    tamerclaw set-token <agent-id> <bot-token>"
+    echo ""
+    echo "  Agent IDs: cto, flutter, frontend, backend, designer, qa, cmo, presentations, digital-marketing"
+    echo ""
+  fi
+
+  echo "  Next steps:"
+  echo "    tamerclaw restart all    # Restart to load new agents"
+  echo "    tamerclaw agents         # List all agents"
+  echo "    tamerclaw status         # Check system status"
+  echo ""
+}
+
 # ── Main Dispatch ─────────────────────────────────────────────────────────────
 case "${1:-}" in
   init)       cmd_init ;;
+  powerup)    cmd_powerup ;;
   update)     cmd_update ;;
   start)      cmd_start "${2:-}" "${3:-}" ;;
   stop)       cmd_stop "${2:-}" ;;
@@ -1755,6 +2204,7 @@ case "${1:-}" in
     echo ""
     echo "  ${BOLD}Setup:${NC}"
     echo "    init                   Initialize TamerClaw (interactive wizard)"
+    echo "    powerup                Set up full agency (CTO + CMO teams with agents)"
     echo "    update                 Pull latest updates and restart services"
     echo "    repair                 Reinstall deps + regenerate service files"
     echo ""

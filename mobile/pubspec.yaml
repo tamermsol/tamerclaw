@@ -1,7 +1,7 @@
 name: tamerclaw_mobile
-description: TamerClaw - Multi-Agent AI Management System
+description: TamerClaw - AI-powered communication assistant for people with speech disabilities. Talk through AI agents using voice, text, and smart assistance.
 publish_to: 'none'
-version: 11.1.0+12
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

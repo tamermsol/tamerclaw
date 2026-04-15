@@ -43,3 +43,19 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Signing keys - NEVER commit
+android/key.properties
+android/*.jks
+android/*.keystore
+ios/Runner/*.mobileprovision
+ios/Runner/*.p12
+ios/AuthKey_*.p8
+
+# Fastlane
+ios/fastlane/report.xml
+android/fastlane/report.xml
+
+# APK/AAB artifacts
+*.apk
+*.aab

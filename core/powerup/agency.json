@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "name": "TamerClaw Agency",
+  "description": "Full-stack software agency with engineering and marketing teams",
+  "teams": {
+    "engineering": {
+      "name": "Engineering",
+      "leader": "cto",
+      "members": ["cto", "flutter", "frontend", "backend", "designer", "qa"]
+    },
+    "marketing": {
+      "name": "Marketing",
+      "leader": "cmo",
+      "members": ["cmo", "presentations", "digital-marketing"]
+    }
+  },
+  "agents": [
+    {
+      "id": "cto",
+      "displayName": "CTO Agent",
+      "emoji": "🏗️",
+      "role": "Chief Technology Officer — Engineering team leader",
+      "teamRole": "leader",
+      "teamId": "engineering",
+      "order": 1
+    },
+    {
+      "id": "flutter",
+      "displayName": "Flutter Developer",
+      "emoji": "📱",
+      "role": "Senior Flutter developer using Mac Mini for builds",
+      "teamRole": "member",
+      "teamId": "engineering",
+      "reportsTo": "cto",
+      "order": 2
+    },
+    {
+      "id": "frontend",
+      "displayName": "Frontend Developer",
+      "emoji": "🌐",
+      "role": "Frontend web developer — React, Next.js, TypeScript",
+      "teamRole": "member",
+      "teamId": "engineering",
+      "reportsTo": "cto",
+      "order": 3
+    },
+    {
+      "id": "backend",
+      "displayName": "Backend Developer",
+      "emoji": "⚙️",
+      "role": "Backend developer — APIs, databases, infrastructure",
+      "teamRole": "member",
+      "teamId": "engineering",
+      "reportsTo": "cto",
+      "order": 4
+    },
+    {
+      "id": "designer",
+      "displayName": "Designer",
+      "emoji": "🎨",
+      "role": "UI/UX designer — design systems, prototypes, visual identity",
+      "teamRole": "member",
+      "teamId": "engineering",
+      "reportsTo": "cto",
+      "order": 5
+    },
+    {
+      "id": "qa",
+      "displayName": "QA Engineer",
+      "emoji": "🔍",
+      "role": "Quality assurance — testing, visual regression, bug hunting",
+      "teamRole": "member",
+      "teamId": "engineering",
+      "reportsTo": "cto",
+      "order": 6
+    },
+    {
+      "id": "cmo",
+      "displayName": "CMO Agent",
+      "emoji": "📣",
+      "role": "Chief Marketing Officer — Marketing team leader",
+      "teamRole": "leader",
+      "teamId": "marketing",
+      "order": 7
+    },
+    {
+      "id": "presentations",
+      "displayName": "Presentation Agent",
+      "emoji": "📊",
+      "role": "Presentation designer — slide decks, pitch materials, visual storytelling",
+      "teamRole": "member",
+      "teamId": "marketing",
+      "reportsTo": "cmo",
+      "order": 8
+    },
+    {
+      "id": "digital-marketing",
+      "displayName": "Digital Marketing Specialist",
+      "emoji": "📈",
+      "role": "Digital marketing — SEO, social media, campaigns, analytics",
+      "teamRole": "member",
+      "teamId": "marketing",
+      "reportsTo": "cmo",
+      "order": 9
+    }
+  ]
+}

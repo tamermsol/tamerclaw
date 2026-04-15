@@ -1,0 +1,29 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Build release IPA for App Store"
+  lane :build do
+    Dir.chdir("../..") do
+      sh("flutter build ipa --release --obfuscate --split-debug-info=build/debug-info --export-method=app-store")
+    end
+  end
+
+  desc "Upload to TestFlight"
+  lane :testflight_upload do
+    build
+    upload_to_testflight(
+      ipa: "../../build/ios/ipa/tamerclaw_mobile.ipa",
+      skip_waiting_for_build_processing: true
+    )
+  end
+
+  desc "Submit for App Store review"
+  lane :release do
+    upload_to_app_store(
+      ipa: "../../build/ios/ipa/tamerclaw_mobile.ipa",
+      submit_for_review: true,
+      automatic_release: false,
+      force: true
+    )
+  end
+end
