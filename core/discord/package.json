@@ -1,8 +1,8 @@
 {
   "name": "tamerclaw-discord",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
-  "description": "TamerClaw Discord bot — Supreme Agent on Discord",
+  "description": "TamerClaw Discord bot — Multi-agent gateway with channel routing",
   "private": true,
   "dependencies": {
     "discord.js": "^14.18.0"

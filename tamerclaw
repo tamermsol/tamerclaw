@@ -2254,6 +2254,9 @@ cmd_discord() {
     setup)
       cmd_discord_setup
       ;;
+    setup-channels)
+      cmd_discord_setup_channels
+      ;;
     start)
       cmd_discord_start "${1:-}"
       ;;
@@ -2273,13 +2276,14 @@ cmd_discord() {
       echo ""
       echo "  ${BOLD}Discord Bot Commands:${NC}"
       echo ""
-      echo "    discord setup         Set up Discord bot (interactive wizard)"
-      echo "    discord start         Start the Discord bot service"
-      echo "    discord start --fg    Start in foreground (debug mode)"
-      echo "    discord stop          Stop the Discord bot service"
-      echo "    discord restart       Safe restart with health checks"
-      echo "    discord status        Show Discord bot status"
-      echo "    discord logs          Tail Discord bot logs"
+      echo "    discord setup           Set up Discord bot (interactive wizard)"
+      echo "    discord setup-channels  Create Discord server channels for agents"
+      echo "    discord start           Start the Discord bot service"
+      echo "    discord start --fg      Start in foreground (debug mode)"
+      echo "    discord stop            Stop the Discord bot service"
+      echo "    discord restart         Safe restart with health checks"
+      echo "    discord status          Show Discord bot status"
+      echo "    discord logs            Tail Discord bot logs"
       echo ""
       ;;
     *)
@@ -2309,11 +2313,31 @@ cmd_discord_setup() {
     echo ""
   fi
 
+  # Detect if agency agents are installed (multi-agent capable)
+  local has_agency="false"
+  local agent_count=0
+  if [ -f "$SCRIPT_DIR/core/powerup/agency.json" ]; then
+    agent_count=$(node -e "
+      const fs = require('fs');
+      try {
+        const a = JSON.parse(fs.readFileSync('$SCRIPT_DIR/core/powerup/agency.json','utf-8'));
+        let c = 0;
+        for (const agent of (a.agents || [])) {
+          if (fs.existsSync('$SCRIPT_DIR/user/agents/' + agent.id)) c++;
+        }
+        console.log(c);
+      } catch { console.log(0); }
+    " 2>/dev/null)
+    if [ "$agent_count" -ge 2 ] 2>/dev/null; then
+      has_agency="true"
+    fi
+  fi
+
   echo "  To set up a Discord bot, you need to create an application at:"
   echo "    ${BOLD}https://discord.com/developers/applications${NC}"
   echo ""
   echo "  Steps:"
-  echo "    1. Click 'New Application', name it (e.g., 'MyBot')"
+  echo "    1. Click 'New Application', name it (e.g., 'MyAgency')"
   echo "    2. Go to 'Bot' tab -> 'Reset Token' -> copy it"
   echo "    3. Enable: MESSAGE CONTENT INTENT, SERVER MEMBERS INTENT, PRESENCE INTENT"
   echo "    4. Go to 'General Information' -> copy 'Application ID' (= Client ID)"
@@ -2353,21 +2377,38 @@ cmd_discord_setup() {
     fi
   done
 
-  # Read guild ID (optional)
-  echo -n "  Guild/Server ID (optional, press Enter to skip): "
+  # Read guild ID (for instant slash commands + channel setup)
+  echo -n "  Guild/Server ID (recommended for multi-agent): "
   read -r guild_id
 
-  # Which agent to use (default: supreme)
-  echo -n "  Agent ID [supreme]: "
-  read -r agent_id
-  agent_id="${agent_id:-supreme}"
-
-  # Respond in all channels?
-  echo -n "  Respond in all server channels? (y/N): "
-  read -r respond_all
+  # Multi-agent mode detection
+  local multi_agent="false"
   local respond_all_flag="false"
-  if [[ "$respond_all" =~ ^[Yy] ]]; then
-    respond_all_flag="true"
+  local agent_id="supreme"
+
+  if [ "$has_agency" = "true" ]; then
+    echo ""
+    echo "  ${GREEN}✓${NC} Detected ${BOLD}${agent_count} agency agents${NC} installed (CTO, Flutter, QA, etc.)"
+    echo ""
+    echo -n "  Enable multi-agent mode? Each agent gets its own channel. (Y/n): "
+    read -r use_multi
+    if [[ ! "$use_multi" =~ ^[Nn] ]]; then
+      multi_agent="true"
+      respond_all_flag="true"
+      echo "  ${GREEN}✓${NC} Multi-agent mode enabled"
+    fi
+  fi
+
+  if [ "$multi_agent" = "false" ]; then
+    echo -n "  Agent ID [supreme]: "
+    read -r agent_id
+    agent_id="${agent_id:-supreme}"
+
+    echo -n "  Respond in all server channels? (y/N): "
+    read -r respond_all
+    if [[ "$respond_all" =~ ^[Yy] ]]; then
+      respond_all_flag="true"
+    fi
   fi
 
   echo ""
@@ -2383,6 +2424,8 @@ cmd_discord_setup() {
       clientId: '$client_id',
       guildId: '${guild_id:-}' || null,
       agentId: '$agent_id',
+      multiAgent: $multi_agent,
+      defaultAgent: 'supreme',
       defaultModel: 'sonnet',
       respondInDMs: true,
       respondInThreads: true,
@@ -2406,9 +2449,8 @@ cmd_discord_setup() {
   echo ""
 
   # Generate invite URL
-  # Permission integer: Send Messages(2048) + Embed Links(16384) + Attach Files(32768)
-  # + Read Message History(65536) + Use Slash Commands(2147483648) + Read Messages(1024)
-  # + Add Reactions(64) + Create Public Threads(34359738368) + Manage Channels(16)
+  # Permissions: Send Messages + Embed Links + Attach Files + Read History + Slash Commands
+  # + Read Messages + Add Reactions + Create Threads + Manage Channels + Manage Roles
   local permissions=36507222096
   local invite_url="https://discord.com/api/oauth2/authorize?client_id=${client_id}&permissions=${permissions}&scope=bot%20applications.commands"
 
@@ -2417,12 +2459,45 @@ cmd_discord_setup() {
   echo "  ${BOLD}Invite URL:${NC}"
   echo "  $invite_url"
   echo ""
+
+  if [ "$multi_agent" = "true" ]; then
+    echo "  ${BOLD}Multi-Agent Mode${NC}"
+    echo "    The bot will auto-create channels for each agent when it first joins."
+    echo "    Or run: ${BOLD}tamerclaw discord setup-channels${NC} to create them now."
+    echo ""
+  fi
+
   echo "  ${BOLD}Next steps:${NC}"
   echo "    1. Open the invite URL above to add the bot to your server"
   echo "    2. Start the bot:  tamerclaw discord start"
   echo "    3. Check status:   tamerclaw discord status"
   echo "    4. View logs:      tamerclaw discord logs"
   echo ""
+}
+
+cmd_discord_setup_channels() {
+  if [ ! -f "$SCRIPT_DIR/user/config.json" ]; then
+    err "TamerClaw not initialized. Run: tamerclaw init"
+    exit 1
+  fi
+
+  local has_discord
+  has_discord=$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8'));
+      console.log(c.discord && c.discord.token ? 'yes' : 'no');
+    } catch { console.log('no'); }
+  " 2>/dev/null)
+
+  if [ "$has_discord" != "yes" ]; then
+    err "Discord not configured. Run: tamerclaw discord setup"
+    exit 1
+  fi
+
+  info "Creating Discord server channels for agency agents..."
+  NODE_PATH="$SCRIPT_DIR/core/discord/node_modules:$SCRIPT_DIR/node_modules" \
+    TAMERCLAW_HOME="$SCRIPT_DIR" \
+    node "$SCRIPT_DIR/core/discord/setup-channels.js"
 }
 
 generate_discord_service() {

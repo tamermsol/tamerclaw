@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * TamerClaw Discord Bot — Supreme Agent on Discord
+ * TamerClaw Discord Bot — Entry Point
  *
- * Entry point for the Discord bot. Reads config from user/config.json,
- * loads the Supreme agent identity, and starts the Discord bot using
- * the shared discord-bot-template.
+ * Auto-detects mode:
+ *   - Multi-agent gateway: If agency agents are installed (via ./tamerclaw powerup),
+ *     routes messages to different agents based on Discord channels.
+ *   - Single-agent: Falls back to the shared discord-bot-template with one agent.
  *
  * Usage:
  *   node core/discord/bot.js
@@ -29,24 +30,20 @@ const LOCK_FILE = path.join(paths.user, 'discord-bot.lock');
 
 function acquireLock() {
   const pid = process.pid;
-  // Check if another instance is running
   if (fs.existsSync(LOCK_FILE)) {
     try {
       const oldPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10);
       if (oldPid && oldPid !== pid) {
         try {
-          process.kill(oldPid, 0); // Check if process exists
+          process.kill(oldPid, 0);
           console.log(`[discord] Another instance running (PID ${oldPid}). Killing it.`);
           process.kill(oldPid, 'SIGTERM');
-          // Wait briefly for old process to die
           const start = Date.now();
           while (Date.now() - start < 3000) {
             try { process.kill(oldPid, 0); } catch { break; }
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
           }
-        } catch {
-          // Process already dead — clean
-        }
+        } catch {}
       }
     } catch {}
   }
@@ -57,9 +54,7 @@ function releaseLock() {
   try {
     if (fs.existsSync(LOCK_FILE)) {
       const lockPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10);
-      if (lockPid === process.pid) {
-        fs.unlinkSync(LOCK_FILE);
-      }
+      if (lockPid === process.pid) fs.unlinkSync(LOCK_FILE);
     }
   } catch {}
 }
@@ -78,27 +73,15 @@ try {
 }
 
 const discordConfig = config.discord || {};
-const agentId = discordConfig.agentId || 'supreme';
 
-// Token sources: env var > config.json > discord-config.json in agent dir
-const token = process.env.TAMERCLAW_DISCORD_TOKEN
-  || discordConfig.token
-  || '';
-
-const clientId = process.env.TAMERCLAW_DISCORD_CLIENT_ID
-  || discordConfig.clientId
-  || '';
-
-const guildId = process.env.TAMERCLAW_DISCORD_GUILD_ID
-  || discordConfig.guildId
-  || null;
+const token = process.env.TAMERCLAW_DISCORD_TOKEN || discordConfig.token || '';
+const clientId = process.env.TAMERCLAW_DISCORD_CLIENT_ID || discordConfig.clientId || '';
+const guildId = process.env.TAMERCLAW_DISCORD_GUILD_ID || discordConfig.guildId || null;
 
 if (!token) {
   console.error('FATAL: Discord bot token not configured.');
   console.error('');
   console.error('Run: ./tamerclaw discord setup');
-  console.error('');
-  console.error('Or set TAMERCLAW_DISCORD_TOKEN environment variable.');
   console.error('');
   console.error('To get a token:');
   console.error('  1. Go to https://discord.com/developers/applications');
@@ -108,90 +91,131 @@ if (!token) {
   console.error('  5. OAuth2 -> URL Generator -> scopes: bot, applications.commands');
   console.error('  6. Permissions: Send Messages, Embed Links, Read Message History,');
   console.error('     Attach Files, Use Slash Commands, Read Messages/View Channels,');
-  console.error('     Add Reactions, Create Public Threads');
+  console.error('     Add Reactions, Create Public Threads, Manage Channels');
   console.error('  7. Add bot to your server with the generated URL');
   process.exit(1);
 }
 
 if (!clientId) {
   console.error('FATAL: Discord client ID not configured.');
-  console.error('');
   console.error('Run: ./tamerclaw discord setup');
-  console.error('Or set TAMERCLAW_DISCORD_CLIENT_ID environment variable.');
   process.exit(1);
 }
 
-// ── Agent Directory Setup ────────────────────────────────────────────────────
+// ── Detect Multi-Agent Mode ─────────────────────────────────────────────────
+// Multi-agent if: (a) config says multiAgent:true, or (b) agency agents are installed
 
-const agentDir = paths.agentDir(agentId);
+function detectMultiAgentMode() {
+  // Explicit config override
+  if (discordConfig.multiAgent === true) return true;
+  if (discordConfig.multiAgent === false) return false;
 
-// Ensure agent directory structure
-for (const dir of [
-  agentDir,
-  path.join(agentDir, 'workspace'),
-  path.join(agentDir, 'media'),
-  path.join(agentDir, 'memory'),
-  path.join(agentDir, 'sessions'),
-]) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  // Auto-detect: check if agency.json exists and at least 2 agents are installed
+  try {
+    const agencyFile = path.join(paths.core, 'powerup', 'agency.json');
+    if (!fs.existsSync(agencyFile)) return false;
+
+    const agency = JSON.parse(fs.readFileSync(agencyFile, 'utf-8'));
+    if (!agency.agents || agency.agents.length < 2) return false;
+
+    // Check if at least 2 agents have directories in user/agents/
+    let installedCount = 0;
+    for (const agent of agency.agents) {
+      const agentDir = paths.agentDir(agent.id);
+      if (fs.existsSync(agentDir)) installedCount++;
+      if (installedCount >= 2) return true;
+    }
+  } catch {}
+
+  return false;
 }
 
-// ── Start Bot ────────────────────────────────────────────────────────────────
+const isMultiAgent = detectMultiAgentMode();
 
 acquireLock();
 
-console.log('');
-console.log('=== TamerClaw Discord Bot ===');
-console.log(`  Agent:     ${agentId}`);
-console.log(`  Client ID: ${clientId}`);
-console.log(`  Guild ID:  ${guildId || '(global)'}`);
-console.log(`  Agent Dir: ${agentDir}`);
-console.log(`  CWD:       ${paths.home}`);
-console.log(`  PID:       ${process.pid}`);
-console.log('');
+// ── Route to Multi-Agent or Single-Agent Mode ───────────────────────────────
 
-// Dynamic import of discord-bot-template (after discord.js is installed)
-let createDiscordBot;
-try {
-  const mod = await import('../shared/discord-bot-template.js');
-  createDiscordBot = mod.createDiscordBot || mod.default;
-} catch (e) {
-  console.error('FATAL: Failed to import discord-bot-template:', e.message);
-  console.error('');
-  console.error('Make sure discord.js is installed:');
-  console.error('  cd core/discord && npm install');
-  process.exit(1);
-}
+if (isMultiAgent) {
+  // Multi-agent gateway — route messages to different agents per channel
+  console.log('');
+  console.log('=== TamerClaw Discord Bot (Multi-Agent Mode) ===');
+  console.log(`  Agents:    detected from agency config`);
+  console.log(`  Client ID: ${clientId}`);
+  console.log(`  Guild ID:  ${guildId || '(global)'}`);
+  console.log(`  PID:       ${process.pid}`);
+  console.log('');
 
-// Allowlist — reuse supreme's allowlist if available
-let allowedUsers = discordConfig.allowedUsers || [];
-if (allowedUsers.length === 0) {
-  // Load from allowlist file if exists
-  const allowlistFile = path.join(paths.credentials, 'discord-allowFrom.json');
   try {
-    if (fs.existsSync(allowlistFile)) {
-      allowedUsers = JSON.parse(fs.readFileSync(allowlistFile, 'utf-8'));
-    }
-  } catch {}
+    const { startMultiAgentBot } = await import('./multi-agent-bot.js');
+    await startMultiAgentBot({ token, clientId, guildId, config });
+  } catch (e) {
+    console.error('FATAL: Failed to start multi-agent bot:', e.message);
+    console.error(e.stack);
+    process.exit(1);
+  }
+} else {
+  // Single-agent mode — original behavior
+  const agentId = discordConfig.agentId || 'supreme';
+  const agentDir = paths.agentDir(agentId);
+
+  // Ensure agent directory structure
+  for (const dir of [
+    agentDir,
+    path.join(agentDir, 'workspace'),
+    path.join(agentDir, 'media'),
+    path.join(agentDir, 'memory'),
+    path.join(agentDir, 'sessions'),
+  ]) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  }
+
+  console.log('');
+  console.log('=== TamerClaw Discord Bot (Single-Agent Mode) ===');
+  console.log(`  Agent:     ${agentId}`);
+  console.log(`  Client ID: ${clientId}`);
+  console.log(`  Guild ID:  ${guildId || '(global)'}`);
+  console.log(`  Agent Dir: ${agentDir}`);
+  console.log(`  PID:       ${process.pid}`);
+  console.log('');
+
+  let createDiscordBot;
+  try {
+    const mod = await import('../shared/discord-bot-template.js');
+    createDiscordBot = mod.createDiscordBot || mod.default;
+  } catch (e) {
+    console.error('FATAL: Failed to import discord-bot-template:', e.message);
+    console.error('Make sure discord.js is installed: cd core/discord && npm install');
+    process.exit(1);
+  }
+
+  let allowedUsers = discordConfig.allowedUsers || [];
+  if (allowedUsers.length === 0) {
+    const allowlistFile = path.join(paths.credentials, 'discord-allowFrom.json');
+    try {
+      if (fs.existsSync(allowlistFile)) {
+        allowedUsers = JSON.parse(fs.readFileSync(allowlistFile, 'utf-8'));
+      }
+    } catch {}
+  }
+
+  const bot = createDiscordBot({
+    agentId,
+    agentDir,
+    token,
+    clientId,
+    guildId,
+    cwd: paths.home,
+    defaultModel: discordConfig.defaultModel || config.defaultModel || 'sonnet',
+    maxTurns: discordConfig.maxTurns || 200,
+    respondInDMs: discordConfig.respondInDMs !== false,
+    respondInThreads: discordConfig.respondInThreads !== false,
+    respondInAllGuildChannels: discordConfig.respondInAllGuildChannels || false,
+    embedColor: discordConfig.embedColor || '#5865F2',
+    allowedUsers,
+    allowedChannels: discordConfig.allowedChannels || [],
+    systemPromptFiles: ['IDENTITY.md', 'MEMORY.md', 'USER.md', 'TOOLS.md'],
+  });
+
+  console.log('[discord] Single-agent bot initialized. Waiting for Discord ready event...');
 }
-
-const bot = createDiscordBot({
-  agentId,
-  agentDir,
-  token,
-  clientId,
-  guildId,
-  cwd: paths.home,
-  defaultModel: discordConfig.defaultModel || config.defaultModel || 'sonnet',
-  maxTurns: discordConfig.maxTurns || 200,
-  respondInDMs: discordConfig.respondInDMs !== false,
-  respondInThreads: discordConfig.respondInThreads !== false,
-  respondInAllGuildChannels: discordConfig.respondInAllGuildChannels || false,
-  embedColor: discordConfig.embedColor || '#5865F2',
-  allowedUsers,
-  allowedChannels: discordConfig.allowedChannels || [],
-  systemPromptFiles: ['IDENTITY.md', 'MEMORY.md', 'USER.md', 'TOOLS.md'],
-});
-
-// Log that we're live
-console.log('[discord] Bot initialization complete. Waiting for Discord ready event...');
