@@ -1,22 +1,43 @@
 {
-  "version": "1.20.1",
-  "codename": "Herald",
-  "releasedAt": "2026-04-15",
-  "changelog": "Fix /whatsnew and /changelog commands — wired handlers into bot-template (all standalone agents) and bridge (relay agents). Previously these commands were only handled in supreme bot.js, causing 'Unknown skill' errors for all other agents.",
+  "version": "1.21.0",
+  "codename": "Discord",
+  "releasedAt": "2026-04-16",
+  "changelog": "Discord support — TamerClaw agents now work on Discord. Run ./tamerclaw discord setup to connect your bot. Full slash commands, streaming responses, multi-language, session management, media handling. Same Supreme Agent experience, now on Discord.",
   "modules": {
-    "new": [],
+    "new": [
+      "discord-bot-template.js",
+      "core/discord/bot.js",
+      "i18n/index.js"
+    ],
     "updated": [
-      "bot-template.js",
-      "bridge/index.js"
+      "tamerclaw CLI"
     ]
   },
   "commands": {
     "new": [
-      { "cmd": "/changelog", "desc": "Show TamerClaw version history", "scope": "all" },
-      { "cmd": "/whatsnew", "desc": "Latest features & command cheat sheet", "scope": "all" }
+      { "cmd": "discord setup", "desc": "Set up Discord bot (interactive wizard)", "scope": "cli" },
+      { "cmd": "discord start", "desc": "Start the Discord bot service", "scope": "cli" },
+      { "cmd": "discord stop", "desc": "Stop the Discord bot service", "scope": "cli" },
+      { "cmd": "discord restart", "desc": "Safe restart Discord bot", "scope": "cli" },
+      { "cmd": "discord status", "desc": "Show Discord bot status", "scope": "cli" },
+      { "cmd": "discord logs", "desc": "Tail Discord bot logs", "scope": "cli" },
+      { "cmd": "/chat", "desc": "Send a message to the AI assistant (Discord slash command)", "scope": "discord" },
+      { "cmd": "/new", "desc": "Start a fresh conversation (Discord)", "scope": "discord" },
+      { "cmd": "/status", "desc": "Show bot status (Discord)", "scope": "discord" },
+      { "cmd": "/model", "desc": "Switch AI model (Discord)", "scope": "discord" },
+      { "cmd": "/lang", "desc": "Switch language EN/AR (Discord)", "scope": "discord" },
+      { "cmd": "/dream", "desc": "Capture ideas for later (Discord)", "scope": "discord" },
+      { "cmd": "/stop", "desc": "Stop current AI process (Discord)", "scope": "discord" },
+      { "cmd": "/help", "desc": "Show available commands (Discord)", "scope": "discord" }
     ]
   },
   "history": [
+    {
+      "version": "1.20.1",
+      "codename": "Herald",
+      "releasedAt": "2026-04-15",
+      "changelog": "Fix /whatsnew and /changelog commands — wired handlers into bot-template and bridge"
+    },
     {
       "version": "1.20.0",
       "codename": "Herald",

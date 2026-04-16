@@ -1,0 +1,10 @@
+{
+  "name": "tamerclaw-discord",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TamerClaw Discord bot — Supreme Agent on Discord",
+  "private": true,
+  "dependencies": {
+    "discord.js": "^14.18.0"
+  }
+}

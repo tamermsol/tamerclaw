@@ -917,6 +917,10 @@ cmd_update() {
   info "Installing/updating dependencies..."
   (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
   (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
+  # Install discord dependencies if discord is configured or package.json exists
+  if [ -f "$SCRIPT_DIR/core/discord/package.json" ]; then
+    (cd "$SCRIPT_DIR/core/discord" && npm install --silent 2>&1 | tail -3) || warn "Discord npm install had issues"
+  fi
 
   # Regenerate systemd service files (paths/configs may have changed)
   if [ -f "$SCRIPT_DIR/user/config.json" ]; then
@@ -984,6 +988,18 @@ SyslogIdentifier=$SVC_SUPREME
 
 [Install]
 WantedBy=$SVC_WANTED_BY"
+
+    # Regenerate Discord service if discord is configured
+    local has_discord
+    has_discord=$(node -e "
+      try {
+        const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8'));
+        console.log(c.discord && c.discord.token ? 'yes' : 'no');
+      } catch { console.log('no'); }
+    " 2>/dev/null)
+    if [ "$has_discord" = "yes" ]; then
+      generate_discord_service
+    fi
   fi
 
   # Reload systemd after regenerating service files
@@ -991,7 +1007,7 @@ WantedBy=$SVC_WANTED_BY"
 
   # Safe-restart only services that exist AND were running
   local services_restarted=0
-  for svc in "$SVC_BRIDGE" "$SVC_SUPREME"; do
+  for svc in "$SVC_BRIDGE" "$SVC_SUPREME" "$SVC_DISCORD"; do
     if $SCTL cat "$svc" &>/dev/null && $SCTL is-active "$svc" &>/dev/null; then
       info "Restarting $svc..."
       if safe_restart_service "$svc"; then
@@ -1060,6 +1076,9 @@ cmd_start() {
       $SCTL start "$SVC_SUPREME"
       info "Supreme Agent started. Logs: $JCTL -u $SVC_SUPREME -f"
       ;;
+    discord)
+      cmd_discord_start ""
+      ;;
     all|"")
       if $SCTL start "$SVC_BRIDGE" 2>/dev/null; then
         info "Bridge started"
@@ -1078,6 +1097,14 @@ cmd_start() {
         echo "    Try running manually to debug:"
         echo "      cd $SCRIPT_DIR/core/supreme && TAMERCLAW_HOME=$SCRIPT_DIR node bot.js"
       fi
+      # Start Discord bot if configured
+      if $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+        if $SCTL start "$SVC_DISCORD" 2>/dev/null; then
+          info "Discord bot started"
+        else
+          warn "Discord bot failed to start (run: tamerclaw discord logs)"
+        fi
+      fi
       echo ""
       info "All services started. Logs: tamerclaw logs"
       ;;
@@ -1092,15 +1119,21 @@ cmd_start() {
           info "Starting supreme in foreground..."
           cd "$SCRIPT_DIR/core/supreme" && TAMERCLAW_HOME="$SCRIPT_DIR" node bot.js
           ;;
+        discord)
+          info "Starting discord bot in foreground..."
+          cd "$SCRIPT_DIR" && TAMERCLAW_HOME="$SCRIPT_DIR" \
+            NODE_PATH="$SCRIPT_DIR/core/discord/node_modules:$SCRIPT_DIR/node_modules" \
+            node core/discord/bot.js
+          ;;
         *)
           err "Unknown foreground target: $fg_target"
-          echo "Usage: tamerclaw start --foreground [bridge|supreme]"
+          echo "Usage: tamerclaw start --foreground [bridge|supreme|discord]"
           ;;
       esac
       ;;
     *)
       err "Unknown target: $target"
-      echo "Usage: tamerclaw start [bridge|supreme|all|--foreground [bridge|supreme]]"
+      echo "Usage: tamerclaw start [bridge|supreme|discord|all|--foreground [bridge|supreme|discord]]"
       ;;
   esac
 }
@@ -1110,8 +1143,10 @@ cmd_stop() {
   case "$target" in
     bridge)  $SCTL stop "$SVC_BRIDGE"; info "Bridge stopped" ;;
     supreme) $SCTL stop "$SVC_SUPREME"; info "Supreme stopped" ;;
+    discord) $SCTL stop "$SVC_DISCORD" 2>/dev/null; info "Discord bot stopped" ;;
     all|"")
       $SCTL stop "$SVC_BRIDGE" 2>/dev/null; $SCTL stop "$SVC_SUPREME" 2>/dev/null
+      $SCTL stop "$SVC_DISCORD" 2>/dev/null
       info "All services stopped"
       ;;
   esac
@@ -1129,7 +1164,15 @@ resolve_services() {
   case "$target" in
     bridge)  echo "$SVC_BRIDGE" ;;
     supreme) echo "$SVC_SUPREME" ;;
-    all|"")  echo "$SVC_BRIDGE $SVC_SUPREME" ;;
+    discord) echo "$SVC_DISCORD" ;;
+    all|"")
+      local svcs="$SVC_BRIDGE $SVC_SUPREME"
+      # Include discord only if service exists
+      if $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+        svcs="$svcs $SVC_DISCORD"
+      fi
+      echo "$svcs"
+      ;;
     *)       echo "tamerclaw-${TC_USER}-${target}" ;;
   esac
 }
@@ -1304,6 +1347,14 @@ cmd_status() {
       echo -e "  ${RED}●${NC} $svc (stopped)"
     fi
   done
+  # Show Discord service status if configured
+  if $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+    if $SCTL is-active "$SVC_DISCORD" &>/dev/null; then
+      echo -e "  ${GREEN}●${NC} $SVC_DISCORD (running)"
+    else
+      echo -e "  ${RED}●${NC} $SVC_DISCORD (stopped)"
+    fi
+  fi
 
   echo ""
   echo -e "${BOLD}Agents:${NC}"
@@ -1341,7 +1392,14 @@ cmd_logs() {
   case "$target" in
     bridge)  $JCTL -u "$SVC_BRIDGE" -f --no-pager ;;
     supreme) $JCTL -u "$SVC_SUPREME" -f --no-pager ;;
-    all|"")  $JCTL -u "$SVC_BRIDGE" -u "$SVC_SUPREME" -f --no-pager ;;
+    discord) $JCTL -u "$SVC_DISCORD" -f --no-pager ;;
+    all|"")
+      local log_svcs="-u $SVC_BRIDGE -u $SVC_SUPREME"
+      if $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+        log_svcs="$log_svcs -u $SVC_DISCORD"
+      fi
+      $JCTL $log_svcs -f --no-pager
+      ;;
   esac
 }
 
@@ -1575,6 +1633,13 @@ cmd_doctor() {
   else
     echo -e "  ${RED}✗${NC} Supreme: node_modules MISSING (run: cd core/supreme && npm install)"
   fi
+  if [ -f "$SCRIPT_DIR/core/discord/package.json" ]; then
+    if [ -d "$SCRIPT_DIR/core/discord/node_modules/discord.js" ]; then
+      echo -e "  ${GREEN}✓${NC} Discord: node_modules installed"
+    else
+      echo -e "  ${YELLOW}~${NC} Discord: node_modules NOT installed (run: tamerclaw discord setup)"
+    fi
+  fi
 
   # Check systemd
   echo ""
@@ -1645,6 +1710,9 @@ cmd_repair() {
   info "Reinstalling dependencies..."
   (cd "$SCRIPT_DIR/core/bridge" && npm install --silent 2>&1 | tail -3) || warn "Bridge npm install had issues"
   (cd "$SCRIPT_DIR/core/supreme" && npm install --silent 2>&1 | tail -3) || warn "Supreme npm install had issues"
+  if [ -f "$SCRIPT_DIR/core/discord/package.json" ]; then
+    (cd "$SCRIPT_DIR/core/discord" && npm install --silent 2>&1 | tail -3) || warn "Discord npm install had issues"
+  fi
 
   # Regenerate systemd service files
   info "Regenerating systemd service files..."
@@ -2173,6 +2241,339 @@ CFGEOF
   echo ""
 }
 
+# ── Discord Command ──────────────────────────────────────────────────────────
+# Manages the Discord bot (setup, start, stop, status, logs)
+
+SVC_DISCORD="$(svc_name discord)"
+
+cmd_discord() {
+  local subcmd="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    setup)
+      cmd_discord_setup
+      ;;
+    start)
+      cmd_discord_start "${1:-}"
+      ;;
+    stop)
+      cmd_discord_stop
+      ;;
+    restart)
+      safe_restart_service "$SVC_DISCORD"
+      ;;
+    status)
+      cmd_discord_status
+      ;;
+    logs)
+      cmd_discord_logs
+      ;;
+    help|"")
+      echo ""
+      echo "  ${BOLD}Discord Bot Commands:${NC}"
+      echo ""
+      echo "    discord setup         Set up Discord bot (interactive wizard)"
+      echo "    discord start         Start the Discord bot service"
+      echo "    discord start --fg    Start in foreground (debug mode)"
+      echo "    discord stop          Stop the Discord bot service"
+      echo "    discord restart       Safe restart with health checks"
+      echo "    discord status        Show Discord bot status"
+      echo "    discord logs          Tail Discord bot logs"
+      echo ""
+      ;;
+    *)
+      err "Unknown discord subcommand: $subcmd"
+      echo "Run 'tamerclaw discord help' for usage."
+      exit 1
+      ;;
+  esac
+}
+
+cmd_discord_setup() {
+  banner
+  echo "  ${BOLD}Discord Bot Setup${NC}"
+  echo ""
+
+  if [ ! -f "$SCRIPT_DIR/user/config.json" ]; then
+    err "TamerClaw not initialized. Run: tamerclaw init"
+    exit 1
+  fi
+
+  # Check if discord.js is installed
+  if [ ! -d "$SCRIPT_DIR/core/discord/node_modules/discord.js" ]; then
+    info "Installing Discord dependencies..."
+    cd "$SCRIPT_DIR/core/discord" && npm install --production 2>&1 | tail -3
+    cd "$SCRIPT_DIR"
+    info "Discord dependencies installed"
+    echo ""
+  fi
+
+  echo "  To set up a Discord bot, you need to create an application at:"
+  echo "    ${BOLD}https://discord.com/developers/applications${NC}"
+  echo ""
+  echo "  Steps:"
+  echo "    1. Click 'New Application', name it (e.g., 'MyBot')"
+  echo "    2. Go to 'Bot' tab -> 'Reset Token' -> copy it"
+  echo "    3. Enable: MESSAGE CONTENT INTENT, SERVER MEMBERS INTENT, PRESENCE INTENT"
+  echo "    4. Go to 'General Information' -> copy 'Application ID' (= Client ID)"
+  echo "    5. In Discord app, enable Developer Mode (Settings -> Advanced)"
+  echo "    6. Right-click your server -> 'Copy Server ID' (= Guild ID)"
+  echo ""
+
+  # Read token
+  local token=""
+  while [ -z "$token" ]; do
+    echo -n "  Discord Bot Token: "
+    read -r token
+    if [ -z "$token" ]; then
+      warn "Token is required."
+    fi
+  done
+
+  # Validate token against Discord API
+  echo -n "  Validating token... "
+  local validate_result
+  validate_result=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bot $token" \
+    "https://discord.com/api/v10/users/@me" 2>/dev/null || echo "000")
+  if [ "$validate_result" = "200" ]; then
+    echo "${GREEN}valid ✓${NC}"
+  else
+    warn "Token validation failed (HTTP $validate_result). Continuing anyway..."
+  fi
+
+  # Read client ID
+  local client_id=""
+  while [ -z "$client_id" ]; do
+    echo -n "  Application/Client ID: "
+    read -r client_id
+    if [ -z "$client_id" ]; then
+      warn "Client ID is required."
+    fi
+  done
+
+  # Read guild ID (optional)
+  echo -n "  Guild/Server ID (optional, press Enter to skip): "
+  read -r guild_id
+
+  # Which agent to use (default: supreme)
+  echo -n "  Agent ID [supreme]: "
+  read -r agent_id
+  agent_id="${agent_id:-supreme}"
+
+  # Respond in all channels?
+  echo -n "  Respond in all server channels? (y/N): "
+  read -r respond_all
+  local respond_all_flag="false"
+  if [[ "$respond_all" =~ ^[Yy] ]]; then
+    respond_all_flag="true"
+  fi
+
+  echo ""
+
+  # Update config.json with discord section
+  info "Saving Discord configuration..."
+  local tmp_config="$SCRIPT_DIR/user/config.json.tmp"
+  node -e "
+    const fs = require('fs');
+    const config = JSON.parse(fs.readFileSync('$SCRIPT_DIR/user/config.json', 'utf-8'));
+    config.discord = {
+      token: '$token',
+      clientId: '$client_id',
+      guildId: '${guild_id:-}' || null,
+      agentId: '$agent_id',
+      defaultModel: 'sonnet',
+      respondInDMs: true,
+      respondInThreads: true,
+      respondInAllGuildChannels: $respond_all_flag,
+      embedColor: '#5865F2',
+      allowedUsers: [],
+      allowedChannels: [],
+    };
+    fs.writeFileSync('$tmp_config', JSON.stringify(config, null, 2));
+  " 2>/dev/null
+  mv "$tmp_config" "$SCRIPT_DIR/user/config.json"
+  info "Configuration saved to user/config.json"
+
+  # Generate systemd service
+  info "Creating systemd service ($SVC_DISCORD)..."
+  generate_discord_service
+  $SCTL daemon-reload 2>/dev/null
+  $SCTL enable "$SVC_DISCORD" 2>/dev/null
+  info "Service created and enabled"
+
+  echo ""
+
+  # Generate invite URL
+  # Permission integer: Send Messages(2048) + Embed Links(16384) + Attach Files(32768)
+  # + Read Message History(65536) + Use Slash Commands(2147483648) + Read Messages(1024)
+  # + Add Reactions(64) + Create Public Threads(34359738368) + Manage Channels(16)
+  local permissions=36507222096
+  local invite_url="https://discord.com/api/oauth2/authorize?client_id=${client_id}&permissions=${permissions}&scope=bot%20applications.commands"
+
+  info "Setup complete!"
+  echo ""
+  echo "  ${BOLD}Invite URL:${NC}"
+  echo "  $invite_url"
+  echo ""
+  echo "  ${BOLD}Next steps:${NC}"
+  echo "    1. Open the invite URL above to add the bot to your server"
+  echo "    2. Start the bot:  tamerclaw discord start"
+  echo "    3. Check status:   tamerclaw discord status"
+  echo "    4. View logs:      tamerclaw discord logs"
+  echo ""
+}
+
+generate_discord_service() {
+  local svc_file="$SVC_DIR/${SVC_DISCORD}.service"
+  local node_bin
+  node_bin=$(which node 2>/dev/null || echo "/usr/bin/node")
+  local claude_bin
+  claude_bin=$(which claude 2>/dev/null || echo "$HOME/.local/bin/claude")
+
+  cat > "$svc_file" <<SVCEOF
+[Unit]
+Description=TamerClaw Discord Bot ($TC_USER)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$node_bin $SCRIPT_DIR/core/discord/bot.js
+WorkingDirectory=$SCRIPT_DIR
+Environment=TAMERCLAW_HOME=$SCRIPT_DIR
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.nvm/versions/node/$(node -v 2>/dev/null || echo "v22.0.0")/bin
+Environment=NODE_PATH=$SCRIPT_DIR/core/discord/node_modules:$SCRIPT_DIR/node_modules
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=$SVC_DISCORD
+
+[Install]
+WantedBy=$SVC_WANTED_BY
+SVCEOF
+
+  chmod 644 "$svc_file"
+}
+
+cmd_discord_start() {
+  local mode="${1:-}"
+
+  if [ ! -f "$SCRIPT_DIR/user/config.json" ]; then
+    err "TamerClaw not initialized. Run: tamerclaw init"
+    exit 1
+  fi
+
+  # Check if Discord is configured
+  local has_discord
+  has_discord=$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8'));
+      console.log(c.discord && c.discord.token ? 'yes' : 'no');
+    } catch { console.log('no'); }
+  " 2>/dev/null)
+
+  if [ "$has_discord" != "yes" ]; then
+    err "Discord not configured. Run: tamerclaw discord setup"
+    exit 1
+  fi
+
+  # Check if discord.js is installed
+  if [ ! -d "$SCRIPT_DIR/core/discord/node_modules/discord.js" ]; then
+    info "Installing Discord dependencies..."
+    cd "$SCRIPT_DIR/core/discord" && npm install --production 2>&1 | tail -3
+    cd "$SCRIPT_DIR"
+  fi
+
+  if [ "$mode" = "--fg" ] || [ "$mode" = "--foreground" ]; then
+    info "Starting Discord bot in foreground..."
+    cd "$SCRIPT_DIR" && TAMERCLAW_HOME="$SCRIPT_DIR" \
+      NODE_PATH="$SCRIPT_DIR/core/discord/node_modules:$SCRIPT_DIR/node_modules" \
+      node core/discord/bot.js
+  else
+    # Generate service if missing
+    if ! $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+      info "Service not found. Generating..."
+      generate_discord_service
+      $SCTL daemon-reload 2>/dev/null
+      $SCTL enable "$SVC_DISCORD" 2>/dev/null
+    fi
+
+    $SCTL start "$SVC_DISCORD"
+    info "Discord bot started. Logs: tamerclaw discord logs"
+  fi
+}
+
+cmd_discord_stop() {
+  $SCTL stop "$SVC_DISCORD" 2>/dev/null
+  info "Discord bot stopped"
+}
+
+cmd_discord_status() {
+  echo ""
+  echo "  ${BOLD}Discord Bot Status:${NC}"
+  echo ""
+
+  # Service status
+  local status="not-configured"
+  if $SCTL cat "$SVC_DISCORD" &>/dev/null 2>&1; then
+    status=$($SCTL is-active "$SVC_DISCORD" 2>/dev/null || echo "stopped")
+  fi
+  case "$status" in
+    active)           echo "  Service: ${GREEN}running${NC}" ;;
+    inactive|stopped) echo "  Service: ${YELLOW}stopped${NC}" ;;
+    failed)           echo "  Service: ${RED}failed${NC}" ;;
+    not-configured)   echo "  Service: ${YELLOW}not configured (run: tamerclaw discord setup)${NC}" ;;
+    *)                echo "  Service: ${RED}$status${NC}" ;;
+  esac
+
+  # Read discord health file if exists
+  local health_file=""
+  local agent_id="supreme"
+
+  # Get agent ID from config
+  agent_id=$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8'));
+      console.log(c.discord?.agentId || 'supreme');
+    } catch { console.log('supreme'); }
+  " 2>/dev/null)
+
+  health_file="$SCRIPT_DIR/user/agents/$agent_id/discord-health.json"
+
+  if [ -f "$health_file" ]; then
+    local bot_user uptime_ms guilds
+    bot_user=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$health_file','utf-8')).user)}catch{console.log('unknown')}" 2>/dev/null)
+    uptime_ms=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$health_file','utf-8')).uptime)}catch{console.log(0)}" 2>/dev/null)
+    guilds=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$health_file','utf-8')).guilds)}catch{console.log(0)}" 2>/dev/null)
+
+    local uptime_h=$(( uptime_ms / 3600000 ))
+    local uptime_m=$(( (uptime_ms % 3600000) / 60000 ))
+
+    echo "  Bot User: $bot_user"
+    echo "  Guilds:   $guilds"
+    echo "  Uptime:   ${uptime_h}h ${uptime_m}m"
+  else
+    echo "  Health:   no health data (bot may not have started yet)"
+  fi
+
+  # Config info
+  local client_id guild_id
+  client_id=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8')).discord?.clientId||'not set')}catch{console.log('not set')}" 2>/dev/null)
+  guild_id=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$SCRIPT_DIR/user/config.json','utf-8')).discord?.guildId||'none')}catch{console.log('none')}" 2>/dev/null)
+
+  echo "  Agent:    $agent_id"
+  echo "  Client:   $client_id"
+  echo "  Guild:    $guild_id"
+  echo ""
+}
+
+cmd_discord_logs() {
+  $JCTL -u "$SVC_DISCORD" -f --no-pager -n 100
+}
+
 # ── Main Dispatch ─────────────────────────────────────────────────────────────
 case "${1:-}" in
   init)       cmd_init ;;
@@ -2195,6 +2596,7 @@ case "${1:-}" in
   add-agent)  cmd_add_agent "${2:-}" "${3:-}" ;;
   allow-all)  cmd_allow_all ;;
   restrict)   cmd_restrict "${2:-}" ;;
+  discord)    cmd_discord "${2:-}" "${3:-}" ;;
   version|-v|--version)
     echo "TamerClaw v${VERSION}"
     ;;
@@ -2215,6 +2617,14 @@ case "${1:-}" in
     echo "    status                 Show system status"
     echo "    doctor                 Run diagnostics (check deps, services, config)"
     echo "    logs [target]          Tail logs (bridge|supreme|all)"
+    echo ""
+    echo "  ${BOLD}Discord:${NC}"
+    echo "    discord setup          Set up Discord bot (interactive wizard)"
+    echo "    discord start [--fg]   Start the Discord bot service"
+    echo "    discord stop           Stop the Discord bot service"
+    echo "    discord restart        Safe restart with health checks"
+    echo "    discord status         Show Discord bot status"
+    echo "    discord logs           Tail Discord bot logs"
     echo ""
     echo "  ${BOLD}Agents:${NC}"
     echo "    agents                 List all agents"

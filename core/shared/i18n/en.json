@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "code": "en",
+    "name": "English",
+    "nativeName": "English",
+    "direction": "ltr",
+    "flag": "\ud83c\uddec\ud83c\udde7"
+  },
+
+  "common": {
+    "error": "Something went wrong. Please try again.",
+    "timeout": "Request timed out. Please try again.",
+    "noPermission": "You don't have permission to use this bot.",
+    "rateLimited": "Too many requests. Please wait a moment.",
+    "processing": "Processing...",
+    "thinking": "Thinking...",
+    "done": "Done",
+    "cancelled": "Cancelled",
+    "yes": "Yes",
+    "no": "No",
+    "back": "Back",
+    "next": "Next",
+    "close": "Close",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "loading": "Loading...",
+    "notFound": "Not found.",
+    "success": "Success!",
+    "failed": "Failed.",
+    "unknown": "Unknown",
+    "none": "None",
+    "and": "and",
+    "or": "or"
+  },
+
+  "commands": {
+    "chat": {
+      "name": "chat",
+      "description": "Send a message to the AI assistant",
+      "optionPrompt": "Your message",
+      "startedSession": "Started a new conversation.",
+      "resumedSession": "Resumed your conversation.",
+      "emptyMessage": "Please provide a message."
+    },
+    "new": {
+      "name": "new",
+      "description": "Start a fresh conversation",
+      "success": "Fresh conversation started. What would you like to talk about?"
+    },
+    "status": {
+      "name": "status",
+      "description": "Show bot status and current session info",
+      "title": "Bot Status",
+      "model": "Model",
+      "session": "Session",
+      "uptime": "Uptime",
+      "messages": "Messages",
+      "language": "Language",
+      "noSession": "No active session",
+      "active": "Active",
+      "idle": "Idle"
+    },
+    "sessions": {
+      "name": "sessions",
+      "description": "Browse past conversation sessions",
+      "title": "Past Sessions",
+      "noSessions": "No past sessions found.",
+      "sessionEntry": "Session #{index} \u2014 {date}",
+      "messages": "{count} messages",
+      "resume": "Resume"
+    },
+    "resume": {
+      "name": "resume",
+      "description": "Resume a previous conversation session",
+      "optionId": "Session number to resume",
+      "success": "Resumed session #{id}.",
+      "notFound": "Session not found. Use /sessions to see available sessions.",
+      "invalid": "Please provide a valid session number."
+    },
+    "model": {
+      "name": "model",
+      "description": "Switch the AI model",
+      "optionModel": "Model to use",
+      "current": "Current model: **{model}**",
+      "switched": "Switched to **{model}**.",
+      "available": "Available models",
+      "invalid": "Invalid model. Choose from: {models}"
+    },
+    "lang": {
+      "name": "lang",
+      "description": "Switch language / \u062a\u063a\u064a\u064a\u0631 \u0627\u0644\u0644\u063a\u0629",
+      "optionLang": "Language / \u0627\u0644\u0644\u063a\u0629",
+      "current": "Current language: **{lang}**",
+      "switched": "Language switched to **{lang}**.",
+      "available": "Available languages",
+      "choiceEn": "English",
+      "choiceAr": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629 (Arabic)"
+    },
+    "dream": {
+      "name": "dream",
+      "description": "Capture ideas and plan them for later",
+      "optionAction": "Action (capture/list/plan/execute/delete)",
+      "optionText": "Your dream or idea description",
+      "optionId": "Dream ID",
+      "captured": "Dream captured!",
+      "planned": "Dream converted to plan.",
+      "executing": "Executing dream plan...",
+      "deleted": "Dream deleted.",
+      "noDreams": "No dreams captured yet. Use `/dream capture <your idea>` to start.",
+      "title": "Your Dreams",
+      "notFound": "Dream not found."
+    },
+    "stop": {
+      "name": "stop",
+      "description": "Stop the current AI process",
+      "success": "Stopped current process.",
+      "noProcess": "No active process to stop."
+    },
+    "help": {
+      "name": "help",
+      "description": "Show available commands and usage",
+      "title": "Available Commands",
+      "footer": "Use `/lang` to switch between English and Arabic.",
+      "commandList": {
+        "chat": "Send a message to the AI",
+        "new": "Start a fresh conversation",
+        "status": "Show bot status",
+        "sessions": "Browse past sessions",
+        "resume": "Resume a past session",
+        "model": "Switch AI model",
+        "lang": "Switch language",
+        "dream": "Capture ideas for later",
+        "stop": "Stop current AI process",
+        "help": "Show this help menu"
+      }
+    }
+  },
+
+  "session": {
+    "newSession": "New conversation started.",
+    "resumed": "Conversation resumed from where you left off.",
+    "expired": "Your previous session expired. Starting a new conversation.",
+    "saved": "Session saved."
+  },
+
+  "streaming": {
+    "generating": "Generating response...",
+    "toolUse": "Using tool: {tool}",
+    "reading": "Reading {file}...",
+    "writing": "Writing {file}...",
+    "editing": "Editing {file}...",
+    "running": "Running command...",
+    "searching": "Searching...",
+    "fetching": "Fetching URL...",
+    "subAgent": "Working with sub-agent...",
+    "continuing": "Continuing... ({n}/{max})",
+    "maxTokens": "Response was truncated. Continuing..."
+  },
+
+  "errors": {
+    "circuitBreakerOpen": "The bot is temporarily overloaded. Please try again in a few minutes.",
+    "processTimeout": "The request took too long and was stopped. Try a simpler question.",
+    "claudeError": "AI processing error. Please try again.",
+    "noResponse": "No response was generated. Please try again.",
+    "tooLong": "The response was too long to display. Here's a summary:",
+    "sessionError": "Session error. Starting a new conversation.",
+    "audioFailed": "Failed to process audio message.",
+    "imageFailed": "Failed to process image."
+  },
+
+  "embeds": {
+    "responseTitle": "Response",
+    "statusTitle": "Status",
+    "errorTitle": "Error",
+    "warningTitle": "Warning",
+    "infoTitle": "Info",
+    "sessionTitle": "Session",
+    "dreamTitle": "Dream",
+    "helpTitle": "Help",
+    "footer": "Powered by Claude | /lang to switch language",
+    "footerWithModel": "Model: {model} | /lang to switch language"
+  },
+
+  "buttons": {
+    "newChat": "New Chat",
+    "resume": "Resume",
+    "switchLang": "Switch Language",
+    "stop": "Stop",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "previous": "Previous",
+    "next": "Next"
+  },
+
+  "welcome": {
+    "title": "Welcome!",
+    "description": "I'm your AI assistant powered by Claude. Send me a message or use `/chat` to start a conversation.",
+    "features": "**What I can do:**\n\u2022 Answer questions and have conversations\n\u2022 Help with coding, writing, and analysis\n\u2022 Process images and audio messages\n\u2022 Remember context within a session\n\n**Quick Start:**\n\u2022 Just type a message in this channel\n\u2022 Use `/help` to see all commands\n\u2022 Use `/lang ar` to switch to Arabic"
+  },
+
+  "audio": {
+    "transcribing": "Transcribing audio...",
+    "transcribed": "Transcribed: \"{text}\"",
+    "processingVoice": "Processing voice message..."
+  }
+}
